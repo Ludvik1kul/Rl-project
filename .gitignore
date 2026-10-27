@@ -1,0 +1,15 @@
+# Large / regenerable artefacts
+data/
+engines/
+runs/
+
+# Papers and personal documents
+*.pdf
+some_thoughts.txt
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv*/
+venv/
