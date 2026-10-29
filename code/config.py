@@ -109,6 +109,19 @@ class EvalConfig:
 
 
 @dataclass
+class PlayConfig:
+    host: str = "127.0.0.1"
+    port: int = 5000
+    device: str = "cpu"          # single-game inference is small; keeps the GPU free for training
+    sims: int = 64               # default agent simulations per move (0 = raw policy)
+    gumbel_scale: float = 0.0    # 0 = deterministic play
+    minutes: float = 5.0         # default time control: minutes per side ...
+    increment: float = 0.0       # ... plus seconds added after each move
+    stockfish_elo: int = 1400    # default Stockfish UCI_Elo (range ~1320-3190)
+    stockfish_time: float = 0.1  # seconds per Stockfish move
+
+
+@dataclass
 class ControllerConfig:
     # Actions: 0 play, 1 search deeper, 2 consult Stockfish, 3 consult judge
     base_sims: int = 32
@@ -159,6 +172,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     warmstart: WarmStartConfig = field(default_factory=WarmStartConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    play: PlayConfig = field(default_factory=PlayConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     run_name: str = "main"
 

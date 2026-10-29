@@ -20,6 +20,7 @@ All parameters and hyperparameters are in `config.py` (dataclasses grouped per c
 | `warmstart.py` | Supervised pretraining on Elite games |
 | `train_selfplay.py` | Main loop: self-play → buffer → train → checkpoint (resumable) |
 | `evaluate.py` | Matches vs. Stockfish (UCI_Elo / Skill Level) or checkpoints, Elo with 95% CI |
+| `play.py`, `play_ui.html` | Play in the browser vs. a checkpoint (search or raw policy) or Stockfish, point-and-click with chess clock |
 | `benchmark.py` | CPU vs. Intel XPU throughput (inference, self-play, training) |
 | `controller/features.py` | Controller state: entropy, visit/Q gaps, WDL, value change, material, ... |
 | `controller/reward.py` | Offline reward: transform (cp / cp_tanh / expected_score), costs, fault model (none / uniform / uncertainty) |
@@ -38,6 +39,7 @@ python warmstart.py train         # -> runs/main/warmstart.pt
 python train_selfplay.py          # runs until stopped; Ctrl+C and rerun to resume
 python evaluate.py stockfish ../runs/main/latest.pt
 python evaluate.py match ../runs/main/checkpoints/iter_00100.pt ../runs/main/checkpoints/iter_00010.pt
+python play.py                    # play against an agent at http://127.0.0.1:5000
 ```
 Controller (after self-play is running; works with any checkpoint):
 ```
