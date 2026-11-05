@@ -6,11 +6,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import chess
 import numpy as np
+import torch
 
 from chess_env.encoding import N_MOVES, decode_move, encode_board, encode_move
 from config import Config
 from mcts.gumbel import gumbel_search, run_batched
 from model import ChessNet, Evaluator, get_device
+from training.losses import train_step
 from training.selfplay import play_games
 
 
@@ -74,6 +76,23 @@ def test_mate_in_one_found():
     cfg.mcts.max_considered_actions = 32
     res = run_batched(ev, [gumbel_search(b, 200, cfg.mcts, 0.0, np.random.default_rng(0))])[0]
     assert res.move == chess.Move.from_uci("a1a8")
+
+
+def test_evaluator_uses_eval_mode_after_training():
+    # Self-play shares the net with the trainer; inference must not depend on batch
+    # composition or update BatchNorm running stats after a train_step.
+    cfg = _tiny_cfg()
+    dev = get_device(cfg.device)
+    net = ChessNet(cfg.model)
+    ev = Evaluator(net, dev)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3)
+    x = np.random.default_rng(0).random((8, 20, 8, 8)).astype(np.float32)
+    train_step(net, opt, x, np.ones(8, dtype=np.int64), np.zeros(8), dev)
+    stats = [b.clone() for b in net.buffers()]
+    single, batch = ev(x[:1]), ev(x)
+    assert np.allclose(single[0], batch[0][:1], atol=1e-5)
+    assert np.allclose(single[1], batch[1][:1], atol=1e-5)
+    assert all(torch.equal(a, b) for a, b in zip(stats, net.buffers()))
 
 
 def test_selfplay_smoke():

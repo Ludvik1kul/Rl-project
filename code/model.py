@@ -73,6 +73,9 @@ class Evaluator:
 
     @torch.inference_mode()
     def __call__(self, planes: np.ndarray):
+        # The same net is trained between self-play rounds (train_step sets train mode);
+        # BatchNorm must use running stats here, not per-batch stats.
+        self.net.eval()
         x = torch.from_numpy(planes).to(self.device)
         logits, wdl = self.net(x)
         return logits.float().cpu().numpy(), torch.softmax(wdl.float(), -1).cpu().numpy()
