@@ -6,6 +6,7 @@ Usage:
 """
 import shutil
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -26,14 +27,23 @@ def download_stockfish(cfg: Config):
     if target.exists():
         print(f"Stockfish already at {target}")
         return
-    zpath = cfg.paths.engines_dir / "stockfish.zip"
-    _fetch(cfg.download.stockfish_url, zpath)
-    with zipfile.ZipFile(zpath) as z:
-        exe = next(n for n in z.namelist() if n.endswith(".exe"))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with z.open(exe) as src, open(target, "wb") as dst:
+    url = cfg.download.stockfish_url
+    apath = cfg.paths.engines_dir / url.rsplit("/", 1)[-1]
+    _fetch(url, apath)
+    # The binary is the archive member named stockfish-<platform>[.exe]; the rest are docs.
+    is_binary = lambda n: Path(n).name.startswith("stockfish-") and Path(n).suffix in ("", ".exe")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if apath.suffix == ".zip":
+        with zipfile.ZipFile(apath) as z, z.open(next(filter(is_binary, z.namelist()))) as src, \
+                open(target, "wb") as dst:
             shutil.copyfileobj(src, dst)
-    zpath.unlink()
+    else:
+        with tarfile.open(apath) as t:
+            member = next(m for m in t.getmembers() if m.isfile() and is_binary(m.name))
+            with t.extractfile(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    target.chmod(0o755)
+    apath.unlink()
     print(f"Stockfish installed at {target}")
 
 
