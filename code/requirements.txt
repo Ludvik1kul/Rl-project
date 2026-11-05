@@ -3,4 +3,3 @@ numpy
 chess
 pytest
 tqdm
-flask

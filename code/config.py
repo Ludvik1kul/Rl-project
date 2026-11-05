@@ -121,59 +121,6 @@ class EvalConfig:
 
 
 @dataclass
-class PlayConfig:
-    host: str = "127.0.0.1"
-    port: int = 5000
-    device: str = "cpu"          # single-game inference is small; keeps the GPU free for training
-    sims: int = 64               # default agent simulations per move (0 = raw policy)
-    gumbel_scale: float = 0.0    # 0 = deterministic play
-    minutes: float = 5.0         # default time control: minutes per side ...
-    increment: float = 0.0       # ... plus seconds added after each move
-    stockfish_elo: int = 1400    # default Stockfish UCI_Elo (range ~1320-3190)
-    stockfish_time: float = 0.1  # seconds per Stockfish move
-
-
-@dataclass
-class ControllerConfig:
-    # Actions: 0 play, 1 search deeper, 2 consult Stockfish, 3 consult judge
-    base_sims: int = 32
-    deeper_multiplier: int = 8   # "search deeper" uses base_sims * this
-    expert_elo: int = 2200       # consult-Stockfish strength (raise if agent gets stronger)
-    expert_time: float = 0.1
-    oracle_depth: int = 16       # privileged training-time evaluator (full strength)
-    oracle_threads: int = 2
-    mate_score: int = 10_000     # cp value used for forced mates
-    # Costs, in the same units as the reward transform (cp by default)
-    cost_play: float = 0.0
-    cost_deeper: float = 5.0
-    cost_expert: float = 20.0
-    cost_judge: float = 50.0
-    # Reward transform applied to oracle evaluations before taking differences:
-    #   "cp": clip(cp, +-cp_clip) | "cp_tanh": cp_scale*tanh(cp/cp_scale)
-    #   "expected_score": 1000 * logistic(cp) (Lichess win-prob curve, in milli-points)
-    reward_transform: str = "cp"
-    cp_clip: float = 1500.0
-    cp_scale: float = 600.0
-    # Fault injection: the agent's own move (play / deeper) is replaced by a random legal move.
-    #   "none" | "uniform": p = fault_rate | "uncertainty": p = min(1, fault_rate*(H_norm/0.5)^power)
-    fault_mode: str = "uncertainty"
-    fault_rate: float = 0.05
-    fault_uncertainty_power: float = 2.0
-    # Counterfactual dataset generation
-    n_dataset_games: int = 400
-    n_parallel_games: int = 16
-    sample_prob: float = 0.5     # fraction of positions labelled (others only played through)
-    random_opening_plies: int = 6
-    max_plies: int = 200
-    # Bandit model
-    hidden: int = 64
-    epochs: int = 200
-    lr: float = 1e-3
-    weight_decay: float = 1e-4
-    val_fraction: float = 0.2    # split by game
-
-
-@dataclass
 class Config:
     paths: PathConfig = field(default_factory=PathConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
@@ -184,8 +131,6 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     warmstart: WarmStartConfig = field(default_factory=WarmStartConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
-    play: PlayConfig = field(default_factory=PlayConfig)
-    controller: ControllerConfig = field(default_factory=ControllerConfig)
     run_name: str = "main"
 
     @property
