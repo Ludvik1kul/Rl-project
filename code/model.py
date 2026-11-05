@@ -16,6 +16,8 @@ def get_device(cfg: DeviceConfig) -> torch.device:
         candidates.append("xpu")
     if torch.cuda.is_available():
         candidates.append("cuda")
+    if torch.backends.mps.is_available():  # Apple Silicon GPU
+        candidates.append("mps")
     for name in candidates:
         try:  # smoke test: a driver problem should fall back, not crash a multi-day run
             dev = torch.device(name)

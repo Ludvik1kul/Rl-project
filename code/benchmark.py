@@ -1,7 +1,7 @@
 """Compare devices for inference (self-play) and training throughput.
 
 Usage:
-    python benchmark.py            # benchmarks cpu and xpu (if available)
+    python benchmark.py            # benchmarks cpu, and xpu / mps if available
 """
 import time
 
@@ -50,3 +50,5 @@ if __name__ == "__main__":
     bench("cpu", cfg)
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         bench("xpu", Config())
+    if torch.backends.mps.is_available():
+        bench("mps", Config())

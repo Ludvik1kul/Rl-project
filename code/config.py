@@ -4,10 +4,23 @@ Edit the defaults below, or build a modified copy in a script, e.g.
     cfg = Config()
     cfg.mcts.n_simulations = 64
 """
+import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent  # project root (parent of code/)
+IS_WINDOWS = platform.system() == "Windows"
+
+
+def _stockfish_asset() -> str:
+    """Release asset for this OS / CPU (https://github.com/official-stockfish/Stockfish/releases)."""
+    system = platform.system()
+    arm = platform.machine().lower() in ("arm64", "aarch64")
+    if system == "Windows":
+        return f"stockfish-windows-{'arm64' if arm else 'x86-64'}-universal.zip"
+    if system == "Darwin":
+        return "stockfish-macos-universal.tar.gz"  # one binary for Apple Silicon and Intel
+    return f"stockfish-linux-{'arm64' if arm else 'x86-64'}-universal.tar.gz"
 
 
 @dataclass
@@ -15,7 +28,7 @@ class PathConfig:
     data_dir: Path = ROOT / "data"
     engines_dir: Path = ROOT / "engines"
     runs_dir: Path = ROOT / "runs"
-    stockfish_path: Path = ROOT / "engines" / "stockfish" / "stockfish.exe"
+    stockfish_path: Path = ROOT / "engines" / "stockfish" / ("stockfish.exe" if IS_WINDOWS else "stockfish")
     warmstart_pgn_dir: Path = ROOT / "data" / "lichess_elite"
     warmstart_dataset: Path = ROOT / "data" / "warmstart.npz"
 
@@ -23,8 +36,7 @@ class PathConfig:
 @dataclass
 class DownloadConfig:
     stockfish_url: str = (
-        "https://github.com/official-stockfish/Stockfish/releases/latest/download/"
-        "stockfish-windows-x86-64-universal.zip"
+        "https://github.com/official-stockfish/Stockfish/releases/latest/download/" + _stockfish_asset()
     )
     # Lichess Elite Database (https://database.nikonoel.fr), one zip per month.
     elite_url_template: str = "https://database.nikonoel.fr/lichess_elite_{month}.zip"
@@ -43,7 +55,7 @@ class ModelConfig:
 
 @dataclass
 class DeviceConfig:
-    device: str = "auto"         # "auto" (xpu -> cuda -> cpu), "xpu", "cpu", "cuda"
+    device: str = "auto"         # "auto" (xpu -> cuda -> mps -> cpu), "xpu", "cuda", "mps", "cpu"
     torch_threads: int = 4       # intra-op threads on CPU
 
 
