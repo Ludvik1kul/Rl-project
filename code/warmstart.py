@@ -21,7 +21,7 @@ from training.replay_buffer import compress_planes, decompress_planes
 
 def build_dataset(cfg: Config):
     ws = cfg.warmstart
-    planes, moves, wdl = [], [], []
+    planes, moves, wdl, game_ids = [], [], [], []
     n_games = 0
     t0 = time.time()
     for pgn_path in sorted(cfg.paths.warmstart_pgn_dir.glob("*.pgn")):
@@ -44,6 +44,7 @@ def build_dataset(cfg: Config):
                         planes.append(compress_planes(encode_board(board)))
                         moves.append(encode_move(move, board.turn))
                         wdl.append(outcome_wdl(result, board.turn))
+                        game_ids.append(n_games)
                     board.push(move)
                 n_games += 1
                 if n_games % 5000 == 0:
@@ -52,8 +53,25 @@ def build_dataset(cfg: Config):
             break
     cfg.paths.warmstart_dataset.parent.mkdir(parents=True, exist_ok=True)
     np.savez(cfg.paths.warmstart_dataset, planes=np.stack(planes),
-             moves=np.array(moves, dtype=np.int16), wdl=np.array(wdl, dtype=np.int8))
+             moves=np.array(moves, dtype=np.int16), wdl=np.array(wdl, dtype=np.int8),
+             game=np.array(game_ids, dtype=np.int32))
     print(f"Saved {len(moves)} positions from {n_games} games")
+
+
+def split_by_game(d, n: int, val_fraction: float, rng: np.random.Generator):
+    """(val, train) position indices with no game in both sets.
+
+    Datasets built before game ids were stored keep positions in game order, so the last block of
+    positions is used as validation (at most one game straddles the boundary).
+    """
+    if "game" in d:
+        game = d["game"]
+        games = np.unique(game)
+        val_games = rng.choice(games, int(round(len(games) * val_fraction)), replace=False)
+        is_val = np.isin(game, val_games)
+        return np.flatnonzero(is_val), np.flatnonzero(~is_val)
+    n_val = int(n * val_fraction)
+    return np.arange(n - n_val, n), np.arange(n - n_val)
 
 
 def train(cfg: Config):
@@ -62,9 +80,8 @@ def train(cfg: Config):
     torch.manual_seed(cfg.train.seed)
     d = np.load(cfg.paths.warmstart_dataset)
     planes, moves, wdl = d["planes"], d["moves"], d["wdl"]
-    perm = rng.permutation(len(moves))
-    n_val = int(len(perm) * ws.val_fraction)
-    val, tr = perm[:n_val], perm[n_val:]
+    val, tr = split_by_game(d, len(moves), ws.val_fraction, rng)
+    n_val = len(val)
 
     device = get_device(cfg.device)
     net = ChessNet(cfg.model).to(device)

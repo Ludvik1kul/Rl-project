@@ -103,3 +103,73 @@ def test_selfplay_smoke():
     assert len(stats) == 6
     planes, pi, pp, wdl = samples
     assert planes.shape[1:] == (20, 8, 8) and len(planes) == len(wdl)
+
+
+def test_considered_visits_matches_mctx_schedule():
+    from mcts.gumbel import considered_visits
+    # mctx get_sequence_of_considered_visits(16, 32): 16 actions x1, 8 x1, 4 x2; full budget used
+    assert considered_visits(16, 32) == [0] * 16 + [1] * 8 + [2] * 4 + [3] * 4
+    assert considered_visits(2, 6) == [0, 0, 1, 1, 2, 2]
+    assert considered_visits(1, 3) == [0, 1, 2]
+    for m, n in [(16, 8), (16, 64), (5, 32), (16, 200)]:
+        assert len(considered_visits(m, n)) == n
+
+
+def test_search_spends_full_budget_on_survivors():
+    cfg = _tiny_cfg()
+    ev = Evaluator(ChessNet(cfg.model), get_device(cfg.device))
+    res = run_batched(ev, [gumbel_search(chess.Board(), 32, cfg.mcts, 1.0, np.random.default_rng(1))])[0]
+    assert res.root.N.sum() == 32
+    assert res.root.N[res.action] == res.root.N.max()   # chosen among the most-visited survivors
+
+
+def test_q_normalization_modes():
+    from mcts.gumbel import Node, sigma
+    cfg = _tiny_cfg()
+    node = Node([None] * 3, np.zeros(3), 0.0, None)
+    q = np.array([-0.1, 0.0, 0.1])
+    cfg.mcts.q_normalization = "minmax"
+    assert np.allclose(sigma(node, q, cfg.mcts) / cfg.mcts.c_visit, [0.0, 0.5, 1.0])
+    cfg.mcts.q_normalization = "fixed"
+    assert np.allclose(sigma(node, q, cfg.mcts) / cfg.mcts.c_visit, [0.45, 0.5, 0.55])
+
+
+def test_resign_calibration():
+    from training.resign import ResignCalibrator, trigger_level
+    assert trigger_level([0.0, -0.95, -0.96, -0.2, -0.97], 2) == -0.95
+    assert trigger_level([-0.99], 2) is None
+    cfg = Config().selfplay
+    cfg.resign_min_samples = 10
+    cal = ResignCalibrator(cfg)
+    for _ in range(50):
+        cal.add(-0.98, True)     # deep trouble: always lost
+        cal.add(-0.85, False)    # only mildly bad: survived
+    cal.update()
+    assert -0.98 < cal.threshold <= -0.85   # resign below -0.85 only, false positives excluded
+    assert cal.false_positive_rate(cal.threshold)[0] == 0.0
+
+
+def test_paired_match_between_agents():
+    from evaluate import AgentPlayer, play_match
+    cfg = _tiny_cfg()
+    cfg.eval.max_plies = 16
+    a = AgentPlayer(cfg, ChessNet(cfg.model), 4, torch.device("cpu"))
+    b = AgentPlayer(cfg, ChessNet(cfg.model), 4, torch.device("cpu"))
+    w, d, l = play_match(a, b, cfg, np.random.default_rng(0), n_games=6, verbose=False)
+    assert w + d + l == 6 and a.n_moves > 0 and b.n_moves > 0
+
+
+def test_train_loop_resumes(tmp_path):
+    import train_selfplay
+    cfg = _tiny_cfg()
+    cfg.paths.runs_dir = tmp_path
+    cfg.selfplay.games_per_iteration = 4
+    cfg.train.min_buffer_size, cfg.train.batch_size = 1, 16
+    cfg.train.buffer_size, cfg.train.checkpoint_every, cfg.train.n_iterations = 500, 1, 2
+    cfg.train_eval.every = 0
+    train_selfplay.main(cfg)
+    lines = (cfg.run_dir / "log.jsonl").read_text().splitlines()
+    assert len(lines) == 2 and (cfg.run_dir / "steps.jsonl").exists()
+    cfg.train.n_iterations = 3
+    train_selfplay.main(cfg)   # resumes from iteration 2
+    assert len((cfg.run_dir / "log.jsonl").read_text().splitlines()) == 3
