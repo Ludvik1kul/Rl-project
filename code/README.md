@@ -21,10 +21,6 @@ All parameters and hyperparameters are in `config.py` (dataclasses grouped per c
 | `train_selfplay.py` | Main loop: self-play → buffer → train → checkpoint (resumable) |
 | `evaluate.py` | Matches vs. Stockfish (UCI_Elo / Skill Level) or checkpoints, Elo with 95% CI |
 | `benchmark.py` | CPU vs. GPU (Intel XPU / Apple MPS) throughput (inference, self-play, training) |
-| `controller/features.py` | Controller state: entropy, visit/Q gaps, WDL, value change, material, ... |
-| `controller/reward.py` | Offline reward: transform (cp / cp_tanh / expected_score), costs, fault model (none / uniform / uncertainty) |
-| `controller/dataset.py` | Counterfactual dataset: oracle eval of base, deeper, expert (Stockfish UCI_Elo 2200) and random-fault moves |
-| `controller/bandit.py` | Gain-predicting MLP, lambda-sweep policy, baselines (always-X, thresholds, oracle), Pareto plot |
 | `tests/` | Encoding round-trip, search sanity (incl. mate-in-one), self-play smoke test |
 
 ## Workflow (run from `code/`)
@@ -39,15 +35,6 @@ python train_selfplay.py          # runs until stopped; Ctrl+C and rerun to resu
 python evaluate.py stockfish ../runs/main/latest.pt
 python evaluate.py match ../runs/main/checkpoints/iter_00100.pt ../runs/main/checkpoints/iter_00010.pt
 ```
-Controller (after self-play is running; works with any checkpoint):
-```
-python -m controller.dataset ../runs/main/latest.pt   # -> runs/main/controller_data.npz
-python -m controller.bandit                           # results JSON + Pareto plot
-```
-The dataset stores raw oracle centipawns and a uniform draw per position, so reward transform,
-costs and fault mode (`ControllerConfig`) can be changed and `controller.bandit` rerun without
-regenerating data.
-
 Training logs are written to `runs/<run_name>/log.jsonl`.
 
 ## Python environments

@@ -10,6 +10,7 @@ import time
 import chess.pgn
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from chess_env.encoding import encode_board, encode_move, outcome_wdl
 from config import Config
@@ -74,15 +75,15 @@ def train(cfg: Config):
 
     for epoch in range(ws.epochs):
         rng.shuffle(tr)
-        for s in range(steps_per_epoch):
+        bar = tqdm(range(steps_per_epoch), desc=f"epoch {epoch + 1}/{ws.epochs}", dynamic_ncols=True)
+        for s in bar:
             ix = np.sort(tr[s * ws.batch_size:(s + 1) * ws.batch_size])
             m = train_step(net, opt, decompress_planes(planes[ix]), moves[ix].astype(np.int64),
                            wdl[ix], device, cfg.train.value_loss_weight)
             sched.step()
-            if s % 200 == 0:
-                print(f"epoch {epoch} step {s}/{steps_per_epoch} " +
-                      " ".join(f"{k}={v:.3f}" for k, v in m.items()))
-        print(f"epoch {epoch} val: {evaluate(net, planes, moves, wdl, val, device)}")
+            if s % 20 == 0:
+                bar.set_postfix({k: f"{v:.3f}" for k, v in m.items()} | {"lr": f"{sched.get_last_lr()[0]:.1e}"})
+        tqdm.write(f"epoch {epoch + 1} val: {evaluate(net, planes, moves, wdl, val, device)}")
 
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     save_checkpoint(cfg.run_dir / "warmstart.pt", net)
@@ -93,7 +94,7 @@ def train(cfg: Config):
 def evaluate(net, planes, moves, wdl, ix, device, bs=2048):
     net.eval()
     correct = vcorrect = 0
-    for i in range(0, len(ix), bs):
+    for i in tqdm(range(0, len(ix), bs), desc="val", leave=False, dynamic_ncols=True):
         b = np.sort(ix[i:i + bs])
         logits, wl = net(torch.from_numpy(decompress_planes(planes[b])).to(device))
         correct += (logits.argmax(-1).cpu().numpy() == moves[b]).sum()
