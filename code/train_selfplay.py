@@ -1,4 +1,8 @@
-"""Main self-play training loop: generate games -> replay buffer -> train -> checkpoint -> evaluate.
+"""Main self-play training loop: generate games -> replay buffer -> train -> gate -> checkpoint -> evaluate.
+
+Gating (GateConfig): every `gate.every` iterations the training net plays the best net so far, and replaces it
+in runs/<run_name>/best.pt only if it scores at least `gate.accept_score`. Self-play and training always use
+the training net; the gate only decides which weights count as the model.
 
 Resumes automatically from runs/<run_name>/latest.pt and buffer.npz, which are always written together
 (with RNG states and the resignation calibration), so a resumed run continues where it was saved.
@@ -77,23 +81,29 @@ def selfplay_metrics(stats, calibrator):
     return m
 
 
-def evaluate_strength(cfg: Config, net, device, iteration, elo_state, run, rng):
-    """Match vs Stockfish at the previous Elo estimate, match vs the previous snapshot, move timing."""
+def evaluate_strength(cfg: Config, net, device, iteration, elo_state, run, rng, best_net=None):
+    """Match vs Stockfish at the previous Elo estimate, match vs the previous snapshot, move timing.
+
+    The Stockfish match rates `best_net` when given (gating on), otherwise the training net `net`.
+    The snapshot match is always the training net against its own snapshot from `every` iterations earlier.
+    """
     te = cfg.train_eval
     lo_b, hi_b = te.elo_bounds
     opp = int(np.clip(elo_state["next_opponent"], lo_b, hi_b))
     agent = AgentPlayer(cfg, net, te.sims, device)
+    rated = agent if best_net is None else AgentPlayer(cfg, best_net, te.sims, device)
     t0 = time.time()
     sf = StockfishPlayer(cfg, elo=opp, move_time=te.opponent_time)
     try:
-        w, d, l = play_match(agent, sf, cfg, rng, te.n_games, verbose=False)
+        w, d, l = play_match(rated, sf, cfg, rng, te.n_games, verbose=False)
     finally:
         sf.close()
     diff, lo, hi = elo_estimate(w, d, l)
     entry = {
-        "iteration": iteration, "opponent_elo": opp, "wins": w, "draws": d, "losses": l,
+        "iteration": iteration, "rated_net": "training" if best_net is None else "best",
+        "opponent_elo": opp, "wins": w, "draws": d, "losses": l,
         "score": (w + 0.5 * d) / (w + d + l), "elo": opp + diff, "elo_lo": opp + lo, "elo_hi": opp + hi,
-        "timing/agent_sec_per_move_batched": agent.search_time / max(agent.n_moves, 1),
+        "timing/agent_sec_per_move_batched": rated.search_time / max(rated.n_moves, 1),
         "timing/stockfish_sec_per_move": sf.search_time / max(sf.n_moves, 1),
         "timing/sf_match_sec": time.time() - t0,
     }
@@ -114,6 +124,28 @@ def evaluate_strength(cfg: Config, net, device, iteration, elo_state, run, rng):
     t_policy, t_search = time_moves(agent, boards, te.sims)
     entry |= {"timing/policy_sec_per_move": t_policy, "timing/search_sec_per_move": t_search}
     return entry
+
+
+def gate_match(cfg: Config, net, best_net, device, iteration, gate_state, rng):
+    """Training net vs best net. If the training net scores at least accept_score, its weights are copied
+    into best_net and gate_state records the promotion. Returns the log entry."""
+    gc = cfg.gate
+    t0 = time.time()
+    w, d, l = play_match(AgentPlayer(cfg, net, gc.sims, device), AgentPlayer(cfg, best_net, gc.sims, device),
+                         cfg, rng, gc.n_games, verbose=False)
+    score = (w + 0.5 * d) / (w + d + l)
+    promoted = score >= gc.accept_score
+    entry = {"iteration": iteration, "vs_best_iteration": gate_state["best_iteration"],
+             "wins": w, "draws": d, "losses": l, "score": score, "elo_diff": elo_estimate(w, d, l)[0],
+             "promoted": int(promoted)}
+    if promoted:
+        best_net.load_state_dict(net.state_dict())
+        gate_state["best_iteration"] = iteration
+        gate_state["promotions"] += 1
+    gate_state["gates"] += 1
+    return entry | {"best_iteration": gate_state["best_iteration"], "promotions": gate_state["promotions"],
+                    "acceptance_rate": gate_state["promotions"] / gate_state["gates"],
+                    "timing/gate_sec": time.time() - t0}
 
 
 def _timing_boards(rng):
@@ -142,6 +174,9 @@ def main(cfg: Config):
     buffer = ReplayBuffer(tc.buffer_size)
     calibrator = ResignCalibrator(cfg.selfplay)
     elo_state = {"estimate": None, "next_opponent": te.initial_elo}
+    # Gating: best_net holds the best weights so far; latest.pt stores them, best.pt is a copy for use.
+    best_net = ChessNet(cfg.model).to(device) if cfg.gate.every else None
+    gate_state = {"best_iteration": 0, "promotions": 0, "gates": 0}
     iteration = global_step = 0
 
     if (run / "latest.pt").exists():
@@ -154,26 +189,57 @@ def main(cfg: Config):
         if "resign" in state:
             calibrator.load_state_dict(state["resign"])
         elo_state = state.get("elo", elo_state)
+        if best_net is not None:
+            if "best" in state:
+                best_net.load_state_dict(state["best"])
+                gate_state = state["gate"]
+            else:   # run started without gating: the current weights are the first best
+                best_net.load_state_dict(net.state_dict())
+                gate_state["best_iteration"] = iteration
         if (run / "buffer.npz").exists():
             buffer.load(run / "buffer.npz")
-        print(f"Resumed at iteration {iteration}, buffer {buffer.size}")
+        print(f"Resumed at iteration {iteration}, buffer {buffer.size}"
+              + (f", best net from iteration {gate_state['best_iteration']}" if best_net is not None else ""))
     elif (run / "warmstart.pt").exists():
         load_checkpoint(run / "warmstart.pt", net, map_location=device)
         print("Starting from warm-start weights")
     else:
         print("Starting from random weights")
 
+    def save_best():
+        # Rewritten on resume too, so best.pt always matches the state the run continues from.
+        _atomic_save(run / "best.pt", lambda f: save_checkpoint(
+            f, best_net, iteration=gate_state["best_iteration"]))
+
+    if best_net is not None:
+        if iteration == 0:
+            best_net.load_state_dict(net.state_dict())
+        save_best()
+
     def checkpoint():
+        extra = {"best": best_net.state_dict(), "gate": gate_state} if best_net is not None else {}
         _atomic_save(run / "latest.pt", lambda f: save_checkpoint(
             f, net, opt, iteration=iteration, global_step=global_step, rng=rng.bit_generator.state,
-            torch_rng=torch.get_rng_state(), resign=calibrator.state_dict(), elo=elo_state))
+            torch_rng=torch.get_rng_state(), resign=calibrator.state_dict(), elo=elo_state, **extra))
         _atomic_save(run / "buffer.npz", buffer.save)
+
+    def gate():
+        entry = gate_match(cfg, net, best_net, device, iteration, gate_state,
+                           np.random.default_rng([tc.seed, iteration, 1]))
+        logger.write("gate", iteration, entry)
+        if entry["promoted"]:
+            save_best()
+        print(f"[gate {iteration}] vs best (iter {entry['vs_best_iteration']}) W/D/L "
+              f"{entry['wins']}/{entry['draws']}/{entry['losses']} score {entry['score']:.3f} -> "
+              + ("promoted" if entry["promoted"] else f"rejected (needs {cfg.gate.accept_score:.2f})"))
 
     def evaluate():
         entry = evaluate_strength(cfg, net, device, iteration, elo_state, run,
-                                  np.random.default_rng([tc.seed, iteration]))
+                                  np.random.default_rng([tc.seed, iteration]), best_net)
+        if best_net is not None:
+            entry["best_iteration"] = gate_state["best_iteration"]
         logger.write("eval", iteration, entry)
-        print(f"[eval {iteration}] elo {entry['elo']:.0f} [{entry['elo_lo']:.0f}, {entry['elo_hi']:.0f}] "
+        print(f"[eval {iteration}] {entry['rated_net']} net elo {entry['elo']:.0f} [{entry['elo_lo']:.0f}, {entry['elo_hi']:.0f}] "
               f"vs SF {entry['opponent_elo']} W/D/L {entry['wins']}/{entry['draws']}/{entry['losses']}")
 
     logger = RunLogger(run)
@@ -234,6 +300,8 @@ def main(cfg: Config):
         out_of_time = tc.time_limit_hours and time.time() - t_start > tc.time_limit_hours * 3600
         if iteration % tc.snapshot_every == 0:
             save_checkpoint(run / "checkpoints" / f"iter_{iteration:05d}.pt", net, iteration=iteration)
+        if best_net is not None and iteration % cfg.gate.every == 0:
+            gate()   # before the evaluation, so it rates the best net including this promotion
         if te.every and iteration % te.every == 0:
             evaluate()
         if iteration % tc.checkpoint_every == 0 or out_of_time:

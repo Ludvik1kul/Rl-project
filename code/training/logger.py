@@ -4,6 +4,7 @@ Streams in runs/<run_name>/:
     steps.jsonl   one line per gradient step (losses, accuracies, gradient norm, lr)
     log.jsonl     one line per iteration (self-play, buffer, search and timing statistics)
     eval.jsonl    one line per evaluation (Elo vs Stockfish, match vs previous snapshot, move timing)
+    gate.jsonl    one line per gate match (training net vs best net, promoted or not)
     tensorboard/  the same scalars; view with `tensorboard --logdir runs`
 """
 import json
@@ -14,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 class RunLogger:
     def __init__(self, run_dir):
-        self.files = {name: open(run_dir / f"{name}.jsonl", "a") for name in ("steps", "log", "eval")}
+        self.files = {name: open(run_dir / f"{name}.jsonl", "a") for name in ("steps", "log", "eval", "gate")}
         self.tb = SummaryWriter(str(run_dir / "tensorboard"))
 
     def write(self, stream: str, step: int, entry: dict, tb_prefix: str = None):

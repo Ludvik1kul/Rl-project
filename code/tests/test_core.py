@@ -201,3 +201,49 @@ def test_train_loop_resumes(tmp_path):
     cfg.train.n_iterations = 3
     train_selfplay.main(cfg)   # resumes from iteration 2
     assert len((cfg.run_dir / "log.jsonl").read_text().splitlines()) == 3
+
+
+def _gated_run_cfg(tmp_path, accept_score):
+    cfg = _tiny_cfg()
+    cfg.paths.runs_dir = tmp_path
+    cfg.selfplay.games_per_iteration = 4
+    cfg.train.min_buffer_size, cfg.train.batch_size = 1, 16
+    cfg.train.buffer_size, cfg.train.checkpoint_every, cfg.train.n_iterations = 500, 1, 2
+    cfg.train_eval.every = 0
+    cfg.eval.max_plies = 12
+    cfg.gate.every, cfg.gate.n_games, cfg.gate.sims, cfg.gate.accept_score = 1, 2, 4, accept_score
+    return cfg
+
+
+def _same_weights(a, b):
+    return all(torch.equal(x, y) for x, y in zip(a.values(), b.values()))
+
+
+def test_gate_promotes_and_resumes(tmp_path):
+    import json
+    import train_selfplay
+    cfg = _gated_run_cfg(tmp_path, accept_score=0.0)   # every candidate passes
+    train_selfplay.main(cfg)
+    gates = [json.loads(x) for x in (cfg.run_dir / "gate.jsonl").read_text().splitlines()]
+    assert [g["promoted"] for g in gates] == [1, 1] and gates[-1]["best_iteration"] == 2
+    best = torch.load(cfg.run_dir / "best.pt", weights_only=False)
+    latest = torch.load(cfg.run_dir / "latest.pt", weights_only=False)
+    assert best["iteration"] == 2 and _same_weights(best["model"], latest["model"])
+    cfg.train.n_iterations = 3
+    train_selfplay.main(cfg)   # resumes with the gate state
+    gates = [json.loads(x) for x in (cfg.run_dir / "gate.jsonl").read_text().splitlines()]
+    assert len(gates) == 3 and gates[-1]["vs_best_iteration"] == 2 and gates[-1]["promotions"] == 3
+
+
+def test_gate_rejects_keeps_initial_best(tmp_path):
+    import json
+    import train_selfplay
+    cfg = _gated_run_cfg(tmp_path, accept_score=1.01)  # no candidate can pass
+    train_selfplay.main(cfg)
+    gates = [json.loads(x) for x in (cfg.run_dir / "gate.jsonl").read_text().splitlines()]
+    assert [g["promoted"] for g in gates] == [0, 0] and gates[-1]["best_iteration"] == 0
+    best = torch.load(cfg.run_dir / "best.pt", weights_only=False)
+    start = torch.load(cfg.run_dir / "checkpoints" / "iter_00000.pt", weights_only=False)
+    latest = torch.load(cfg.run_dir / "latest.pt", weights_only=False)
+    assert best["iteration"] == 0 and _same_weights(best["model"], start["model"])
+    assert _same_weights(latest["best"], start["model"]) and not _same_weights(latest["model"], start["model"])

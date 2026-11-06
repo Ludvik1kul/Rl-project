@@ -40,14 +40,20 @@ test runs change fields on a copy.
    - Training steps follow the data: each position is used about `target_reuse` = 6 times.
    - Optional, off by default: resignation calibrated on no-resign games, KataGo playout-cap
      randomisation, and visit-count sampling in the opening.
-6. **Evaluation** (`evaluate.py`, and inside the training loop). Colour-paired games against Stockfish
+6. **Gating** (`train_selfplay.py`, `GateConfig`). Every 10 iterations the training net plays 40
+   colour-paired games (64 simulations) against the best net so far. It replaces the best net, saved as
+   `best.pt`, only if it scores at least 55% (the AlphaGo Zero rule). Self-play and training are not
+   affected: the training net keeps generating games and training whether or not it is promoted.
+   `gate.every = 0` turns gating off.
+7. **Evaluation** (`evaluate.py`, and inside the training loop). Colour-paired games against Stockfish
    (UCI_Elo) or another checkpoint, with an Elo estimate and 95% CI. During training, every 10 iterations
-   the opponent is set to the previous estimate.
+   the opponent is set to the previous estimate. With gating on, the Stockfish match rates the best net
+   (after that iteration's gate); the match against the previous snapshot is still the training net's.
 
 ## Layout
 | File | Purpose |
 |---|---|
-| `config.py` | All parameters: paths, model, MCTS, self-play, training, warm start, evaluation |
+| `config.py` | All parameters: paths, model, MCTS, self-play, training, warm start, evaluation, gating |
 | `chess_env/encoding.py` | 20-plane board encoding, 4168-move policy index, game result as a value (side-to-move perspective) |
 | `model.py` | `ChessNet` (residual tower, policy head, tanh value head), batched `Evaluator`, device auto-detection (xpu → cuda → mps → cpu), checkpoints |
 | `mcts/gumbel.py` | Gumbel AlphaZero search as Python generators; `run_batched` batches leaf evaluations across searches |
@@ -58,7 +64,7 @@ test runs change fields on a copy.
 | `training/logger.py` | JSONL + TensorBoard logging (per step, per iteration, per evaluation) |
 | `download.py` | Downloads Stockfish and Lichess Elite PGNs |
 | `warmstart.py` | `build`: sample positions and label them with Stockfish; `train`: supervised warm start |
-| `train_selfplay.py` | Main loop: self-play → buffer → train → checkpoint → periodic Elo evaluation (exactly resumable) |
+| `train_selfplay.py` | Main loop: self-play → buffer → train → gate (`best.pt`) → checkpoint → periodic Elo evaluation (exactly resumable) |
 | `evaluate.py` | Parallel, colour-paired matches vs. Stockfish or checkpoints; Elo with 95% CI; move timing |
 | `benchmark.py` | CPU vs. GPU throughput (inference, self-play, training) |
 | `tests/` | Encoding, search (visit schedule, Q mapping, mate-in-one), resignation, self-play, paired match, train-loop resume |
@@ -72,7 +78,7 @@ python download.py elite          # months set in DownloadConfig.elite_months
 python warmstart.py build         # positions + Stockfish labels -> data/warmstart_sf.npz
 python warmstart.py train         # -> runs/v2/warmstart.pt
 python train_selfplay.py          # runs until stopped; Ctrl+C and rerun to resume
-python evaluate.py stockfish ../runs/v2/latest.pt
+python evaluate.py stockfish ../runs/v2/best.pt      # best net that passed the gate (latest.pt = training net)
 python evaluate.py match ../runs/v2/checkpoints/iter_00100.pt ../runs/v2/checkpoints/iter_00010.pt
 ```
 `warmstart.py` takes overrides after the command, e.g. `python warmstart.py build warmstart.max_games=500`.
@@ -90,6 +96,8 @@ Each run directory `runs/<run_name>/` gets:
   value error, resignation threshold and false-positive rate, buffer reuse, timings)
 - `eval.jsonl`: every `TrainEvalConfig.every` iterations: Elo vs. Stockfish, a match vs. the previous
   snapshot, and seconds per move with the raw policy and with search
+- `gate.jsonl`: every `GateConfig.every` iterations: training net vs best net (W/D/L, score, promoted,
+  iteration of the current best, acceptance rate so far)
 - `tensorboard/`: the same numbers. Start with `tensorboard --logdir runs` and open http://localhost:6006.
 
 The warm start logs the same way to `runs/<run_name>/warmstart_logs/`: every gradient step, validation
@@ -97,7 +105,9 @@ metrics per epoch, and a match against Stockfish after each epoch (`WarmStartCon
 UCI_Elo 1500 at 0.1 s/move by default). It saves `warmstart.pt` and `warmstart_epochN.pt` after every epoch.
 
 `latest.pt` and `buffer.npz` are written together every `checkpoint_every` iterations, with the RNG
-states, so a rerun resumes exactly from the last checkpoint.
+states, so a rerun resumes exactly from the last checkpoint. `latest.pt` also holds the best net and the
+gate state; `best.pt` is rewritten from it on resume, so it always matches the state the run continues from.
+A run started before gating existed takes its current weights as the first best net.
 
 ## Notes from the test runs (November 2026)
 These used the earlier win/draw/loss value head.
