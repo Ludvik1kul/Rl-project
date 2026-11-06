@@ -61,10 +61,13 @@ class DeviceConfig:
 
 @dataclass
 class MCTSConfig:
-    n_simulations: int = 32      # simulations per move (full search)
-    max_considered_actions: int = 16   # m in Gumbel sequential halving
+    n_simulations: int = 16      # simulations per move (full search)
+    max_considered_actions: int = 16   # m in Gumbel sequential halving (paper: m = min(n, 16))
     c_visit: float = 50.0        # sigma transform constants (Danihelka et al. 2022)
-    c_scale: float = 1.0
+    c_scale: float = 1.0         # paper: 1.0 for Go and chess (0.1 only for Atari)
+    # Q-values entering sigma: "minmax" rescales each node's completed Q to [0, 1] (paper App. F, mctx);
+    # "fixed" maps [-1, 1] -> [0, 1] with (q + 1) / 2 (previous behaviour).
+    q_normalization: str = "minmax"
     gumbel_scale: float = 1.0    # 0 disables Gumbel noise (deterministic play)
 
 
@@ -72,14 +75,22 @@ class MCTSConfig:
 class SelfPlayConfig:
     n_parallel_games: int = 64   # games stepped together for batched inference
     games_per_iteration: int = 128
-    # Playout cap randomisation (KataGo): only full searches become policy targets
-    full_search_prob: float = 0.25
+    # Paper: every move is a full search and a training target (full_search_prob = 1).
+    # < 1 enables KataGo playout cap randomisation: the other moves use fast_simulations and are not recorded.
+    full_search_prob: float = 1.0
     fast_simulations: int = 8
-    gumbel_plies: int = 30       # plies with Gumbel noise at root (exploration)
+    gumbel_plies: int = 1000     # plies with Gumbel noise at root; >= max_plies = every move (paper)
     max_plies: int = 300         # adjudicate draw after this many plies
-    resign_threshold: float = -0.90   # value (W-L) below which a side may resign
+    # Resignation on the root search value. The threshold is recalibrated on the no-resign games so
+    # that at most resign_target_fp of would-be resignations did not actually lose (AlphaGo Zero).
+    resign_threshold: float = -0.90   # initial threshold (search value W-L)
     resign_consecutive: int = 4
-    no_resign_fraction: float = 0.1   # games where resignation is disabled
+    no_resign_fraction: float = 0.1   # games where resignation is disabled (used for calibration)
+    resign_calibrate: bool = True
+    resign_target_fp: float = 0.05
+    resign_min_samples: int = 20      # would-be resignations needed before the threshold moves
+    resign_window: int = 2000         # most recent no-resign (game, side) records kept
+    resign_bounds: tuple = (-0.99, -0.5)
 
 
 @dataclass
@@ -90,11 +101,17 @@ class TrainConfig:
     value_loss_weight: float = 1.0
     buffer_size: int = 300_000   # positions in replay buffer
     min_buffer_size: int = 10_000
+    # Train steps per iteration = target_reuse * new_positions / batch_size, so each position is
+    # sampled about target_reuse times while it is in the buffer. 0 -> fixed train_steps_per_iteration.
+    target_reuse: float = 6.0
     train_steps_per_iteration: int = 200
-    checkpoint_every: int = 1    # iterations between overwriting latest.pt
+    max_train_steps_per_iteration: int = 1000
+    # Keep playing batches of games_per_iteration until at least this many new positions (0 = one batch).
+    min_positions_per_iteration: int = 0
+    checkpoint_every: int = 5    # iterations between saving latest.pt + buffer.npz together (resume point)
     snapshot_every: int = 10     # iterations between kept checkpoints (for Elo progress)
-    buffer_save_every: int = 10  # iterations between saving the replay buffer (~400MB)
     n_iterations: int = 100_000  # effectively "run until stopped"
+    time_limit_hours: float = 0.0    # stop (after a checkpoint) once exceeded; 0 = no limit
     seed: int = 0
 
 
@@ -117,7 +134,23 @@ class EvalConfig:
     opponent_skill_level: int = -1   # >=0 uses "Skill Level" instead of UCI_Elo
     opponent_time: float = 0.05  # seconds per move for Stockfish
     max_plies: int = 300
-    random_opening_plies: int = 4    # randomised openings to avoid repeated games
+    random_opening_plies: int = 4    # each random opening is played twice, colours swapped
+    max_parallel_games: int = 50     # games stepped together (agent moves are batched)
+
+
+@dataclass
+class TrainEvalConfig:
+    """Periodic evaluation inside train_selfplay.py."""
+    every: int = 10              # iterations between evaluations (0 = off)
+    at_start: bool = True        # also evaluate the starting weights (iteration 0)
+    n_games: int = 40            # vs Stockfish; ~ +-150 Elo 95% CI at 40 games
+    sims: int = 64
+    opponent_time: float = 0.05
+    initial_elo: int = 1600      # first opponent; afterwards the previous estimate is used
+    elo_bounds: tuple = (1320, 3190)  # Stockfish UCI_Elo range
+    max_elo_step: int = 400      # cap on how far the opponent moves between evaluations
+    match_games: int = 20        # vs the snapshot from `every` iterations earlier (0 = off)
+    timing_positions: int = 50   # positions used to time a policy-only move
 
 
 @dataclass
@@ -131,6 +164,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     warmstart: WarmStartConfig = field(default_factory=WarmStartConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    train_eval: TrainEvalConfig = field(default_factory=TrainEvalConfig)
     run_name: str = "main"
 
     @property

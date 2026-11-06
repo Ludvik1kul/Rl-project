@@ -70,12 +70,15 @@ class Evaluator:
     def __init__(self, net: ChessNet, device: torch.device):
         self.net = net.to(device).eval()
         self.device = device
+        self.n_calls = self.n_positions = 0   # throughput counters
 
     @torch.inference_mode()
     def __call__(self, planes: np.ndarray):
         # The same net is trained between self-play rounds (train_step sets train mode);
         # BatchNorm must use running stats here, not per-batch stats.
         self.net.eval()
+        self.n_calls += 1
+        self.n_positions += len(planes)
         x = torch.from_numpy(planes).to(self.device)
         logits, wdl = self.net(x)
         return logits.float().cpu().numpy(), torch.softmax(wdl.float(), -1).cpu().numpy()

@@ -28,5 +28,11 @@ def train_step(net, optimizer, planes, policy_target, wdl, device, value_weight=
     loss = policy_loss + value_weight * value_loss
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    grad_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), float("inf"))  # measure only
     optimizer.step()
-    return {"loss": loss.item(), "policy_loss": policy_loss.item(), "value_loss": value_loss.item()}
+    with torch.no_grad():
+        target = pt.long() if pt.dim() == 1 else pt.argmax(-1)
+        policy_acc = (logits.argmax(-1) == target).float().mean()
+        value_acc = (wdl_logits.argmax(-1) == torch.as_tensor(wdl, device=device).long()).float().mean()
+    return {"loss": loss.item(), "policy_loss": policy_loss.item(), "value_loss": value_loss.item(),
+            "grad_norm": grad_norm.item(), "policy_acc": policy_acc.item(), "value_acc": value_acc.item()}
