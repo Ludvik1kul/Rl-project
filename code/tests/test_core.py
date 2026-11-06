@@ -136,25 +136,45 @@ def test_q_normalization_modes():
 
 
 def test_resign_calibration():
-    from training.resign import ResignCalibrator, trigger_level
+    from training.resign import RESIGN_OFF, ResignCalibrator, trigger_level
     assert trigger_level([0.0, -0.95, -0.96, -0.2, -0.97], 2) == -0.95
     assert trigger_level([-0.99], 2) is None
     cfg = Config().selfplay
     cfg.resign_min_samples = 10
     cal = ResignCalibrator(cfg)
-    assert not cal.enabled                   # no resignation before calibration
+    assert cal.threshold == RESIGN_OFF      # suspended until calibrated
     for _ in range(50):
         cal.add(-0.98, True)     # deep trouble: always lost
         cal.add(-0.85, False)    # only mildly bad: survived
     cal.update()
-    assert cal.enabled
     assert -0.98 < cal.threshold <= -0.85   # resign below -0.85 only, false positives excluded
     assert cal.false_positive_rate(cal.threshold)[0] == 0.0
-    bad = ResignCalibrator(cfg)
+
+
+def test_resign_suspended_when_no_threshold_is_safe():
+    from training.resign import RESIGN_OFF, ResignCalibrator
+    cfg = Config().selfplay
+    cfg.resign_min_samples, cfg.resign_window = 10, 100
+    cal = ResignCalibrator(cfg)
     for _ in range(50):
-        bad.add(-1.0, False)     # even the most hopeless-looking positions survive
-    bad.update()
-    assert not bad.enabled
+        cal.add(-0.995, True)
+        cal.add(-0.995, False)   # half of the would-be resignations at every threshold survive
+    cal.update()
+    assert cal.threshold == RESIGN_OFF
+    for _ in range(100):         # value estimates become reliable: the old records leave the window
+        cal.add(-0.98, True)
+    cal.update()
+    assert cfg.resign_bounds[0] <= cal.threshold <= cfg.resign_bounds[1]
+
+
+def test_selfplay_resign_off_and_opening_exploration():
+    cfg = _tiny_cfg()
+    assert not cfg.selfplay.resign and cfg.selfplay.explore_plies == 0   # defaults
+    cfg.selfplay.explore_plies = 1000      # sample every move by visit counts
+    ev = Evaluator(ChessNet(cfg.model), get_device(cfg.device))
+    _, stats = play_games(ev, cfg, 6, np.random.default_rng(0), resign_threshold=1.0)
+    assert len(stats) == 6
+    assert all(s["termination"] != "resign" and not s["resign_allowed"] for s in stats)
 
 
 def test_paired_match_between_agents():

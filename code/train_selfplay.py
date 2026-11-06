@@ -22,7 +22,7 @@ from model import ChessNet, Evaluator, get_device, load_checkpoint, save_checkpo
 from training.logger import RunLogger
 from training.losses import dense_policy_target, train_step
 from training.replay_buffer import ReplayBuffer
-from training.resign import ResignCalibrator, trigger_level
+from training.resign import RESIGN_OFF, ResignCalibrator, trigger_level
 from training.selfplay import play_games
 
 
@@ -42,8 +42,7 @@ def play_iteration(evaluator, cfg: Config, rng, calibrator):
     """Plays batches of games until min_positions_per_iteration is reached (at least one batch)."""
     samples, stats = [], []
     while True:
-        s, st = play_games(evaluator, cfg, cfg.selfplay.games_per_iteration, rng, calibrator.threshold,
-                           calibrator.enabled)
+        s, st = play_games(evaluator, cfg, cfg.selfplay.games_per_iteration, rng, calibrator.threshold)
         stats += st
         if s is not None:
             samples.append(s)
@@ -66,7 +65,8 @@ def selfplay_metrics(stats, calibrator):
         "search/target_entropy": _mean([e for e, _, _ in search]),
         "search/kl_target_prior": _mean([kl for _, kl, _ in search]),
         "search/value_mse_vs_result": _mean([se for _, _, se in search]),
-        "resign/enabled": int(calibrator.enabled), "resign/threshold": calibrator.threshold,
+        "resign/enabled": int(calibrator.cfg.resign and calibrator.threshold > RESIGN_OFF),
+        "resign/threshold": calibrator.threshold,
         "resign/false_positive_rate": fp, "resign/fp_samples": fp_n,
         "resign/fp_rate_at_min_threshold": calibrator.false_positive_rate(calibrator.cfg.resign_bounds[0])[0],
         "resign/no_resign_games": sum(not s["resign_allowed"] for s in stats),

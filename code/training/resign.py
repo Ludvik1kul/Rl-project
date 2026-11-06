@@ -4,15 +4,17 @@ For every (game, side) of a no-resign game we store the lowest threshold that wo
 side resign: the minimum over all runs of `resign_consecutive` own moves of the largest search value
 in the run. A would-be resignation at threshold t is a false positive if the side did not lose.
 The threshold is set to the highest value whose false-positive rate stays within the target.
-
-Resignation starts disabled (every game is played out and used for calibration) and is enabled only
-while some threshold meets the target; if none does, it is switched off again.
+If no threshold within the bounds meets the target, resignation is suspended (threshold RESIGN_OFF)
+until one does. With calibration on it also starts suspended: resignation begins only once the
+no-resign games have shown a threshold that meets the target.
 """
 from collections import deque
 
 import numpy as np
 
 from config import SelfPlayConfig
+
+RESIGN_OFF = -1.0   # search values are >= -1, so `value < RESIGN_OFF` never triggers
 
 
 def trigger_level(values, k: int):
@@ -26,8 +28,7 @@ def trigger_level(values, k: int):
 class ResignCalibrator:
     def __init__(self, cfg: SelfPlayConfig):
         self.cfg = cfg
-        self.threshold = cfg.resign_threshold
-        self.enabled = not cfg.resign_calibrate          # calibrated resignation starts off
+        self.threshold = RESIGN_OFF if cfg.resign_calibrate else cfg.resign_threshold
         self.records = deque(maxlen=cfg.resign_window)   # (trigger level, side lost)
 
     def add(self, level: float, lost: bool):
@@ -50,14 +51,14 @@ class ResignCalibrator:
                 best = float(t)
         if best is not None:
             self.threshold = best
-            self.enabled = True
-        elif self.false_positive_rate(lo)[1] >= self.cfg.resign_min_samples:
-            self.enabled = False  # enough evidence, but no threshold meets the target: do not resign
+        elif self.false_positive_rate(hi)[1] >= self.cfg.resign_min_samples:
+            # Enough evidence, yet no threshold down to the lowest bound meets the target: resigning
+            # would mislabel games as losses, so stop until the value estimates are reliable again.
+            self.threshold = RESIGN_OFF
 
     def state_dict(self):
-        return {"threshold": self.threshold, "enabled": self.enabled, "records": list(self.records)}
+        return {"threshold": self.threshold, "records": list(self.records)}
 
     def load_state_dict(self, state):
         self.threshold = state["threshold"]
-        self.enabled = state.get("enabled", self.enabled)
         self.records.extend(tuple(r) for r in state["records"])

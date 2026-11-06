@@ -28,9 +28,20 @@ from training.replay_buffer import compress_planes, decompress_planes
 
 
 def sample_positions(cfg: Config, rng: np.random.Generator):
-    """Up to positions_per_game random positions (after skip_first_plies) from each qualifying game.
+    """
+    Reads each .pgn file in ROOT / data / lichess_elite, one at time, with python-chess.
 
-    Returns a list of (fen, human move index, game result value for the side to move, game id)."""
+    It keeps a game only if it finished with a real result ("1-0", "0-1", "1/2-1/2") and
+    both players are rated at least cfg.warmstart.min_elo. It stops after cfg.warmstart.max_games.
+
+    From each kept game it draws up to cfg.warmstart.positions_per_game random positions (after
+    cfg.warmstart.skip_first_plies), so the dataset covers more games with less correlated positions.
+
+    Returns a list of (fen, human move index, game result value for the side to move, game id).
+
+    Resources:
+    python-chess doc: https://python-chess.readthedocs.io/en/latest/index.html
+    """
     ws = cfg.warmstart
     out, n_games = [], 0
     for pgn_path in sorted(cfg.paths.warmstart_pgn_dir.glob("*.pgn")):
@@ -52,6 +63,9 @@ def sample_positions(cfg: Config, rng: np.random.Generator):
                 if not len(plies):
                     continue
                 chosen = set(rng.choice(plies, min(ws.positions_per_game, len(plies)), replace=False).tolist())
+
+                # Replay the game (already filtered) from scratch.
+                # See https://python-chess.readthedocs.io/en/latest/_modules/chess/pgn.html#GameNode.board
                 board = game.board()
                 for ply, move in enumerate(moves):
                     if ply in chosen:
@@ -98,6 +112,16 @@ def label_positions(cfg: Config, fens):
 
 
 def build_dataset(cfg: Config):
+    """
+    Samples positions (sample_positions), labels them with Stockfish (label_positions) and saves
+    cfg.paths.warmstart_dataset (data/warmstart_sf.npz) with, per position:
+    - planes    :   uint8, chess_env.encoding.encode_board compressed by replay_buffer.compress_planes
+    - moves     :   int16, the human move (chess_env.encoding.encode_move), the policy target
+    - sf_value  :   float32, Stockfish's P(win) - P(loss) for the side to move, the value target
+    - sf_move   :   int16, Stockfish's best move (-1 if none)
+    - result    :   float32, the game result for the side to move (+1 / 0 / -1)
+    - game      :   int32, the game id, used later for the validation split
+    """
     ws = cfg.warmstart
     t0 = time.time()
     samples = sample_positions(cfg, np.random.default_rng(cfg.train.seed))
@@ -126,6 +150,8 @@ def split_by_game(d, n: int, val_fraction: float, rng: np.random.Generator):
 
     Datasets built before game ids were stored keep positions in game order, so the last block of
     positions is used as validation (at most one game straddles the boundary).
+
+    Hyperparameter for % of validation in cfg.warmstart.val_fraction
     """
     if "game" in d:
         game = d["game"]
@@ -138,6 +164,28 @@ def split_by_game(d, n: int, val_fraction: float, rng: np.random.Generator):
 
 
 def train(cfg: Config):
+    """
+    Builds a model.ChessNet:
+        - 8 residual block and 96 channels,
+        - policy head with 4 168 logits
+        - value head with 1 tanh output in [-1, 1]
+
+    Trained with AdamW optimizer with a OneCycle scheduler for a dynamic learning rate.
+    Learning rate in cfg.warmstart.lr (default at 2e-3)
+    Learning rate decay in cfg.train.weight_decay (default at 1e-4).
+
+    At each epoch, it shuffles the training indices and walks trough them in batches cfg.warmstart.batch_size
+
+    At each step, losses.train_step is called:
+        - policy loss   = cross-entropy against the human move;
+        - value loss    = mean squared error against the value target, which is
+                          cfg.warmstart.sf_value_weight * Stockfish value + (1 - sf_value_weight) * game result;
+        - loss          = policy loss + value_loss_weight * value loss (cfg.train.value_loss_weight, default 1)
+
+
+    Resources:
+    - https://docs.pytorch.org/docs/2.15/generated/torch.optim.lr_scheduler.OneCycleLR.html
+    """
     ws = cfg.warmstart
     rng = np.random.default_rng(cfg.train.seed)
     torch.manual_seed(cfg.train.seed)
@@ -149,6 +197,8 @@ def train(cfg: Config):
     device = get_device(cfg.device)
     net = ChessNet(cfg.model).to(device)
     steps_per_epoch = len(tr) // ws.batch_size
+    # NOTE: AdamW optimizer with a OneCycle scheduler for a dynamic learning rate
+    # See docs: https://docs.pytorch.org/docs/2.15/generated/torch.optim.lr_scheduler.OneCycleLR.html
     opt = torch.optim.AdamW(net.parameters(), lr=ws.lr, weight_decay=cfg.train.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, ws.lr, total_steps=ws.epochs * steps_per_epoch)
     print(f"Device {device}, {len(tr)} train / {len(val)} val positions, value target "
@@ -158,6 +208,7 @@ def train(cfg: Config):
         rng.shuffle(tr)
         bar = tqdm(range(steps_per_epoch), desc=f"epoch {epoch + 1}/{ws.epochs}", dynamic_ncols=True)
         for s in bar:
+            # NOTE: within a batch, indices are sorted only to speed up memory reads
             ix = np.sort(tr[s * ws.batch_size:(s + 1) * ws.batch_size])
             m = train_step(net, opt, decompress_planes(planes[ix]), moves[ix].astype(np.int64),
                            value[ix], device, cfg.train.value_loss_weight)
@@ -171,14 +222,18 @@ def train(cfg: Config):
     print(f"Saved {cfg.run_dir / 'warmstart.pt'}")
 
 
-@torch.inference_mode()
+@torch.inference_mode()  # no autograd graph: faster, less memory, no accidental training
 def evaluate(net, planes, moves, sf_moves, value, ix, device, bs=2048):
-    """Move accuracy (human and Stockfish move), value MSE/MAE and the MSE of always predicting the mean."""
+    """Validation metrics, averaged per position: policy cross-entropy against the human move, value MSE
+    (the same losses as train_step), move accuracy for the human and the Stockfish move, value MAE, and
+    the value MSE of always predicting the mean (a baseline)."""
     net.eval()
-    human = sf = se = ae = 0.0
+    human = sf = se = ae = ce = 0.0
     for i in tqdm(range(0, len(ix), bs), desc="val", leave=False, dynamic_ncols=True):
         b = np.sort(ix[i:i + bs])
         logits, v = net(torch.from_numpy(decompress_planes(planes[b])).to(device))
+        logp = torch.log_softmax(logits.float(), -1)
+        ce -= logp.gather(1, torch.from_numpy(moves[b].astype(np.int64)).to(device)[:, None]).sum().item()
         top = logits.argmax(-1).cpu().numpy()
         human += (top == moves[b]).sum()
         sf += (top == sf_moves[b]).sum()
@@ -186,7 +241,7 @@ def evaluate(net, planes, moves, sf_moves, value, ix, device, bs=2048):
         se += (err ** 2).sum()
         ae += np.abs(err).sum()
     n = len(ix)
-    return {"move_acc": round(human / n, 4), "sf_move_acc": round(sf / n, 4), "value_mse": round(se / n, 4),
+    return {"policy_loss": round(ce / n, 4), "move_acc": round(human / n, 4), "sf_move_acc": round(sf / n, 4), "value_mse": round(se / n, 4),
             "value_mae": round(ae / n, 4), "value_mse_const": round(float(value[ix].var()), 4)}
 
 

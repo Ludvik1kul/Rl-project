@@ -65,9 +65,13 @@ class MCTSConfig:
     max_considered_actions: int = 16   # m in Gumbel sequential halving (paper: m = min(n, 16))
     c_visit: float = 50.0        # sigma transform constants (Danihelka et al. 2022)
     c_scale: float = 1.0         # paper: 1.0 for Go and chess (0.1 only for Atari)
-    # Q-values entering sigma: "minmax" rescales each node's completed Q to [0, 1] (paper App. F, mctx);
-    # "fixed" maps [-1, 1] -> [0, 1] with (q + 1) / 2 (previous behaviour).
-    q_normalization: str = "minmax"
+    # Q-values entering sigma, mapped to [0, 1] (paper App. F):
+    #   "fixed"  (q + 1) / 2. Chess values already lie in [-1, 1]; with c_scale = 1 this is the paper's
+    #            Go/chess setting. The target moves away from the prior in proportion to the Q gaps.
+    #   "minmax" rescales each node's completed Q to [0, 1] (mctx). The paper uses min-max only for Atari,
+    #            tree-wide and with c_scale = 0.1. With c_scale = 1 it stretches any gap, even pure noise,
+    #            to 51 logits and gives near one-hot targets (test run of Nov 2026: Elo 1409 -> 808).
+    q_normalization: str = "fixed"
     gumbel_scale: float = 1.0    # 0 disables Gumbel noise (deterministic play)
 
 
@@ -80,12 +84,24 @@ class SelfPlayConfig:
     full_search_prob: float = 1.0
     fast_simulations: int = 8
     gumbel_plies: int = 1000     # plies with Gumbel noise at root; >= max_plies = every move (paper)
+    # Plies at the start of each game where the move played is sampled in proportion to the root visit
+    # counts (MuZero / AlphaGo Zero; paper App. F uses 30, with n = 200). Off by default: with
+    # n_simulations = 16 = max_considered_actions every candidate gets one visit, so this would pick
+    # uniformly among 16 moves. Gumbel noise already makes each move a sample from the improved policy.
+    # Worth trying at 64+ simulations.
+    explore_plies: int = 0
     max_plies: int = 300         # adjudicate draw after this many plies
-    # Resignation on the root search value. The threshold is recalibrated on the no-resign games so
-    # that at most resign_target_fp of would-be resignations did not actually lose (AlphaGo Zero).
+    # Resignation on the root search value (AlphaGo Zero; not used in the Gumbel paper or MuZero).
+    # Off by default: in the test run, would-be resignations failed to lose up to 24% of the time even at
+    # -0.99, so resigned games became mislabelled losses. Every game is still recorded for calibration,
+    # so the false-positive rate stays visible in the logs.
+    resign: bool = False
+    # When resign is on, the threshold is recalibrated on the no-resign games so that at most
+    # resign_target_fp of would-be resignations did not actually lose; if no threshold in resign_bounds
+    # meets the target, resignation is suspended until one does.
     resign_threshold: float = -0.90   # initial threshold (search value W-L)
     resign_consecutive: int = 4
-    no_resign_fraction: float = 0.1   # games where resignation is disabled (used for calibration)
+    no_resign_fraction: float = 0.1   # with resign on: games where it is disabled (used for calibration)
     resign_calibrate: bool = True
     resign_target_fp: float = 0.05
     resign_min_samples: int = 20      # would-be resignations needed before the threshold moves
