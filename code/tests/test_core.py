@@ -101,8 +101,9 @@ def test_selfplay_smoke():
     ev = Evaluator(ChessNet(cfg.model), get_device(cfg.device))
     samples, stats = play_games(ev, cfg, 6, np.random.default_rng(0))
     assert len(stats) == 6
-    planes, pi, pp, wdl = samples
-    assert planes.shape[1:] == (20, 8, 8) and len(planes) == len(wdl)
+    planes, pi, pp, value = samples
+    assert planes.shape[1:] == (20, 8, 8) and len(planes) == len(value)
+    assert set(np.unique(value)) <= {-1.0, 0.0, 1.0}
 
 
 def test_considered_visits_matches_mctx_schedule():
@@ -126,7 +127,7 @@ def test_search_spends_full_budget_on_survivors():
 def test_q_normalization_modes():
     from mcts.gumbel import Node, sigma
     cfg = _tiny_cfg()
-    node = Node([None] * 3, np.zeros(3), 0.0, None)
+    node = Node([None] * 3, np.zeros(3), 0.0)
     q = np.array([-0.1, 0.0, 0.1])
     cfg.mcts.q_normalization = "minmax"
     assert np.allclose(sigma(node, q, cfg.mcts) / cfg.mcts.c_visit, [0.0, 0.5, 1.0])
@@ -135,12 +136,13 @@ def test_q_normalization_modes():
 
 
 def test_resign_calibration():
-    from training.resign import ResignCalibrator, trigger_level
+    from training.resign import RESIGN_OFF, ResignCalibrator, trigger_level
     assert trigger_level([0.0, -0.95, -0.96, -0.2, -0.97], 2) == -0.95
     assert trigger_level([-0.99], 2) is None
     cfg = Config().selfplay
     cfg.resign_min_samples = 10
     cal = ResignCalibrator(cfg)
+    assert cal.threshold == RESIGN_OFF      # suspended until calibrated
     for _ in range(50):
         cal.add(-0.98, True)     # deep trouble: always lost
         cal.add(-0.85, False)    # only mildly bad: survived

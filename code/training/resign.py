@@ -5,7 +5,8 @@ side resign: the minimum over all runs of `resign_consecutive` own moves of the 
 in the run. A would-be resignation at threshold t is a false positive if the side did not lose.
 The threshold is set to the highest value whose false-positive rate stays within the target.
 If no threshold within the bounds meets the target, resignation is suspended (threshold RESIGN_OFF)
-until one does.
+until one does. With calibration on it also starts suspended: resignation begins only once the
+no-resign games have shown a threshold that meets the target.
 """
 from collections import deque
 
@@ -27,7 +28,7 @@ def trigger_level(values, k: int):
 class ResignCalibrator:
     def __init__(self, cfg: SelfPlayConfig):
         self.cfg = cfg
-        self.threshold = cfg.resign_threshold
+        self.threshold = RESIGN_OFF if cfg.resign_calibrate else cfg.resign_threshold
         self.records = deque(maxlen=cfg.resign_window)   # (trigger level, side lost)
 
     def add(self, level: float, lost: bool):

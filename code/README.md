@@ -1,29 +1,67 @@
 # Gumbel AlphaZero chess + metareasoning controller
 
-DRE 7060 course project. Phase 1 (this code): a warm-started, self-play chess agent
-using Gumbel AlphaZero search, plus a rating harness. Phase 2 (todo): the controller
-that chooses between *play*, *search deeper*, *consult Stockfish*, and *consult judge*.
+DRE 7060 course project.
 
-All parameters and hyperparameters are in `config.py` (dataclasses grouped per component).
+- **Phase 1 (this code):** a chess agent that is first trained by supervised learning on strong
+  human games, with Stockfish evaluations as value targets, and then improved by self-play with
+  Gumbel AlphaZero search (Danihelka et al., 2022). It includes a rating harness against Stockfish.
+- **Phase 2 (planned, to be redesigned):** a controller that decides per move whether extra
+  computation or outside help is worth its cost.
+
+Every parameter lives in `config.py` (one dataclass per component). Scripts read `Config()`; tests and
+test runs change fields on a copy.
+
+## How it works
+
+1. **Data.** `download.py` fetches Stockfish and Lichess Elite PGNs.
+2. **Warm start** (`warmstart.py`).
+   - **Positions:** 10 random positions from each game where both players are rated 2000 or more.
+   - **Value target:** Stockfish 19 (50k nodes per position, 7 processes in parallel) gives its own
+     win/draw/loss estimate, stored as P(win) − P(loss) for the side to move, in [−1, 1]. Forced mates
+     count as ±1.
+   - **Policy target:** the move the human played.
+   - **Also stored:** Stockfish's best move and the game result, so the targets can be changed without
+     relabelling.
+3. **Network** (`model.py`). An AlphaZero-style residual network (scaled down to 8 blocks × 96 channels,
+   20 input planes):
+   - a policy head over 4,168 moves;
+   - a value head with a single tanh output in [−1, 1].
+
+   Loss: policy cross-entropy + squared value error.
+4. **Search** (`mcts/gumbel.py`). Gumbel AlphaZero:
+   - Gumbel-top-k at the root, then sequential halving with the mctx visit schedule.
+   - Unvisited moves get the mixed value v_mix (completed Q).
+   - The policy target is the improved policy π' = softmax(logits + σ(Q)).
+   - Q is mapped to [0, 1] by (q + 1)/2 with c_visit = 50, c_scale = 1 (the paper's Go/chess setting);
+     per-node min-max is an option.
+5. **Self-play** (`training/selfplay.py`, `train_selfplay.py`):
+   - 64 games share one network batch, and each game advances on its own.
+   - Every move uses a 16-simulation search with Gumbel noise and becomes a training position.
+   - Training steps follow the data: each position is used about `target_reuse` = 6 times.
+   - Optional, off by default: resignation calibrated on no-resign games, KataGo playout-cap
+     randomisation, and visit-count sampling in the opening.
+6. **Evaluation** (`evaluate.py`, and inside the training loop). Colour-paired games against Stockfish
+   (UCI_Elo) or another checkpoint, with an Elo estimate and 95% CI. During training, every 10 iterations
+   the opponent is set to the previous estimate.
 
 ## Layout
 | File | Purpose |
 |---|---|
-| `config.py` | All parameters (paths, model, MCTS, self-play, training, warm start, eval) |
-| `chess_env/encoding.py` | 20-plane board encoding, 4168-move policy index (side-to-move perspective) |
-| `model.py` | ResNet with policy + WDL value head; device auto-detection (xpu → cuda → mps → cpu) |
-| `mcts/gumbel.py` | Gumbel AlphaZero search (sequential halving with the mctx visit schedule, completed-Q improved policy, Q mapped to [0, 1] by (q + 1) / 2 as in the paper's Go/chess setting; per-node min-max optional); generator-based leaf batching across games |
-| `training/selfplay.py` | Batched self-play with Gumbel noise at the root on every move, optional opening exploration by visit counts, optional playout-cap randomisation and resignation (both off by default), and length adjudication |
-| `training/resign.py` | Resignation threshold calibrated on no-resign games (false positives <= 5%, AlphaGo Zero); suspended when no threshold meets the target |
+| `config.py` | All parameters: paths, model, MCTS, self-play, training, warm start, evaluation |
+| `chess_env/encoding.py` | 20-plane board encoding, 4168-move policy index, game result as a value (side-to-move perspective) |
+| `model.py` | `ChessNet` (residual tower, policy head, tanh value head), batched `Evaluator`, device auto-detection (xpu → cuda → mps → cpu), checkpoints |
+| `mcts/gumbel.py` | Gumbel AlphaZero search as Python generators; `run_batched` batches leaf evaluations across searches |
+| `training/selfplay.py` | Self-play games sharing one batch; Gumbel noise every move; optional opening exploration, playout-cap randomisation and resignation |
+| `training/resign.py` | Resignation threshold calibrated on no-resign games (≤ 5% false positives, AlphaGo Zero); starts suspended and stays suspended while no threshold is safe |
+| `training/replay_buffer.py` | Compact ring buffer (uint8 planes, top-128 sparse policy targets, float16 values) |
+| `training/losses.py` | One training step: policy cross-entropy + value MSE |
 | `training/logger.py` | JSONL + TensorBoard logging (per step, per iteration, per evaluation) |
-| `training/replay_buffer.py` | Compact ring buffer (uint8 planes, sparse policy targets) |
-| `training/losses.py` | Policy CE + WDL CE training step |
 | `download.py` | Downloads Stockfish and Lichess Elite PGNs |
-| `warmstart.py` | Supervised pretraining on Elite games |
+| `warmstart.py` | `build`: sample positions and label them with Stockfish; `train`: supervised warm start |
 | `train_selfplay.py` | Main loop: self-play → buffer → train → checkpoint → periodic Elo evaluation (exactly resumable) |
-| `evaluate.py` | Parallel, colour-paired matches vs. Stockfish (UCI_Elo / Skill Level) or checkpoints, Elo with 95% CI |
-| `benchmark.py` | CPU vs. GPU (Intel XPU / Apple MPS) throughput (inference, self-play, training) |
-| `tests/` | Encoding round-trip, search sanity (incl. mate-in-one), self-play smoke test |
+| `evaluate.py` | Parallel, colour-paired matches vs. Stockfish or checkpoints; Elo with 95% CI; move timing |
+| `benchmark.py` | CPU vs. GPU throughput (inference, self-play, training) |
+| `tests/` | Encoding, search (visit schedule, Q mapping, mate-in-one), resignation, self-play, paired match, train-loop resume |
 
 ## Workflow (run from `code/`)
 ```
@@ -31,22 +69,42 @@ pip install -r requirements.txt
 python -m pytest tests
 python download.py stockfish
 python download.py elite          # months set in DownloadConfig.elite_months
-python warmstart.py build
-python warmstart.py train         # -> runs/main/warmstart.pt
+python warmstart.py build         # positions + Stockfish labels -> data/warmstart_sf.npz
+python warmstart.py train         # -> runs/v2/warmstart.pt
 python train_selfplay.py          # runs until stopped; Ctrl+C and rerun to resume
-python evaluate.py stockfish ../runs/main/latest.pt
-python evaluate.py match ../runs/main/checkpoints/iter_00100.pt ../runs/main/checkpoints/iter_00010.pt
+python evaluate.py stockfish ../runs/v2/latest.pt
+python evaluate.py match ../runs/v2/checkpoints/iter_00100.pt ../runs/v2/checkpoints/iter_00010.pt
 ```
-Training logs are written to `runs/<run_name>/`:
-- `steps.jsonl`: every gradient step (loss, policy/value loss and accuracy, gradient norm, lr)
-- `log.jsonl`: every iteration (games, terminations, search-target entropy and KL to the prior,
-  value error, resignation threshold and false-positive rate, buffer reuse, timings)
-- `eval.jsonl`: every `TrainEvalConfig.every` iterations: Elo vs. Stockfish (opponent set to the previous
-  estimate), match vs. the previous snapshot, and seconds per move with policy only and with search
-- `tensorboard/`: the same scalars, `tensorboard --logdir runs`
+`warmstart.py` takes overrides after the command, e.g. `python warmstart.py build warmstart.max_games=500`.
+The 27k-game dataset (about 270k positions) takes about 70 minutes to label on an 8-core laptop.
 
-`latest.pt` and `buffer.npz` are written together every `checkpoint_every` iterations (with RNG states),
-so a rerun resumes exactly from the last checkpoint.
+Short test runs that write only to `test_run/<name>/`:
+```
+python ../test_run/run_test.py my_test mcts.n_simulations=32 mcts.c_scale=0.1
+```
+
+## Logs and TensorBoard
+Each run directory `runs/<run_name>/` gets:
+- `steps.jsonl`: every gradient step (loss, policy and value loss, policy accuracy, value MAE, gradient norm, lr)
+- `log.jsonl`: every iteration (games and terminations, search-target entropy and KL to the prior,
+  value error, resignation threshold and false-positive rate, buffer reuse, timings)
+- `eval.jsonl`: every `TrainEvalConfig.every` iterations: Elo vs. Stockfish, a match vs. the previous
+  snapshot, and seconds per move with the raw policy and with search
+- `tensorboard/`: the same numbers. Start with `tensorboard --logdir runs` and open http://localhost:6006.
+
+`latest.pt` and `buffer.npz` are written together every `checkpoint_every` iterations, with the RNG
+states, so a rerun resumes exactly from the last checkpoint.
+
+## Notes from the test runs (November 2026)
+These used the earlier win/draw/loss value head.
+- **Min-max Q with c_scale = 1 hurts.** It gave near one-hot policy targets and cost about 200 Elo even
+  before training, so the default is the paper's (q + 1)/2 map.
+- **Resignation is off by default.** Even at a value of −0.99, about 20% of would-be resignations did not
+  lose, because the warm-start value head was overconfident.
+- **Self-play from the old warm start lost strength within 10 iterations at every setting tried.** This is
+  why the warm start was redone with Stockfish value targets and a scalar value head.
+
+`runs/main/` holds the old win/draw/loss model, which does not load into the current network.
 
 ## Python environments
 Runs on Windows, macOS and Linux. `download.py stockfish` fetches the Stockfish build for the current
@@ -62,4 +120,6 @@ OS / CPU, and `get_device` smoke-tests the GPU and falls back to CPU if it fails
 ## References
 - Danihelka et al., *Policy improvement by planning with Gumbel*, ICLR 2022.
 - Silver et al., *A general reinforcement learning algorithm that masters chess, shogi and Go through self-play*, Science 2018.
-- Wu, *Accelerating self-play learning in Go* (KataGo), 2019 — playout cap randomisation.
+- Silver et al., *Mastering the game of Go without human knowledge*, Nature 2017 (resignation calibration).
+- Wu, *Accelerating self-play learning in Go* (KataGo), 2019 (playout-cap randomisation).
+- The Stockfish developers, *Stockfish 19* (value labels and evaluation opponent).

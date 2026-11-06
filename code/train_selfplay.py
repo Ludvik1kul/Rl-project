@@ -22,7 +22,7 @@ from model import ChessNet, Evaluator, get_device, load_checkpoint, save_checkpo
 from training.logger import RunLogger
 from training.losses import dense_policy_target, train_step
 from training.replay_buffer import ReplayBuffer
-from training.resign import ResignCalibrator, trigger_level
+from training.resign import RESIGN_OFF, ResignCalibrator, trigger_level
 from training.selfplay import play_games
 
 
@@ -38,11 +38,11 @@ def _mean(xs):
     return float(np.mean(xs)) if len(xs) else float("nan")
 
 
-def play_iteration(evaluator, cfg: Config, rng, threshold):
+def play_iteration(evaluator, cfg: Config, rng, calibrator):
     """Plays batches of games until min_positions_per_iteration is reached (at least one batch)."""
     samples, stats = [], []
     while True:
-        s, st = play_games(evaluator, cfg, cfg.selfplay.games_per_iteration, rng, threshold)
+        s, st = play_games(evaluator, cfg, cfg.selfplay.games_per_iteration, rng, calibrator.threshold)
         stats += st
         if s is not None:
             samples.append(s)
@@ -65,7 +65,10 @@ def selfplay_metrics(stats, calibrator):
         "search/target_entropy": _mean([e for e, _, _ in search]),
         "search/kl_target_prior": _mean([kl for _, kl, _ in search]),
         "search/value_mse_vs_result": _mean([se for _, _, se in search]),
-        "resign/threshold": calibrator.threshold, "resign/false_positive_rate": fp, "resign/fp_samples": fp_n,
+        "resign/enabled": int(calibrator.cfg.resign and calibrator.threshold > RESIGN_OFF),
+        "resign/threshold": calibrator.threshold,
+        "resign/false_positive_rate": fp, "resign/fp_samples": fp_n,
+        "resign/fp_rate_at_min_threshold": calibrator.false_positive_rate(calibrator.cfg.resign_bounds[0])[0],
         "resign/no_resign_games": sum(not s["resign_allowed"] for s in stats),
     }
     for t in ("checkmate", "stalemate", "insufficient_material", "seventyfive_moves", "fivefold_repetition",
@@ -183,7 +186,7 @@ def main(cfg: Config):
     while iteration < tc.n_iterations:
         t0 = time.time()
         calls0, pos0 = evaluator.n_calls, evaluator.n_positions
-        samples, stats = play_iteration(evaluator, cfg, rng, calibrator.threshold)
+        samples, stats = play_iteration(evaluator, cfg, rng, calibrator)
         new_positions = 0 if samples is None else len(samples[3])
         if samples is not None:
             buffer.add(*samples)
@@ -200,9 +203,9 @@ def main(cfg: Config):
             n_steps = tc.train_steps_per_iteration if tc.target_reuse <= 0 else \
                 int(np.clip(round(tc.target_reuse * new_positions / tc.batch_size), 1, tc.max_train_steps_per_iteration))
             for _ in range(n_steps):
-                planes, pi, pp, wdl = buffer.sample(tc.batch_size, rng)
+                planes, pi, pp, value = buffer.sample(tc.batch_size, rng)
                 target = dense_policy_target(pi, pp, cfg.model.n_moves)
-                m = train_step(net, opt, planes, target, wdl, device, tc.value_loss_weight)
+                m = train_step(net, opt, planes, target, value, device, tc.value_loss_weight)
                 global_step += 1
                 losses.append(m)
                 logger.write("steps", global_step, m | {"lr": opt.param_groups[0]["lr"], "iteration": iteration + 1},

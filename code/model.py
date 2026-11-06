@@ -1,4 +1,4 @@
-"""Residual policy / WDL-value network and device helpers."""
+"""Residual policy / value network and device helpers."""
 import numpy as np
 import torch
 import torch.nn as nn
@@ -45,9 +45,9 @@ class ResBlock(nn.Module):
 
 class ChessNet(nn.Module):
     """
-    Outputs policy logits (n_moves) and WDL logits (3) for the side to move.
+    Outputs policy logits (n_moves) and a value in [-1, 1] (tanh) for the side to move.
 
-    Based on Alphazero architecture (Silver et al. 2018), scaled down. 
+    Based on Alphazero architecture (Silver et al. 2018), scaled down.
     """
 
     def __init__(self, cfg: ModelConfig):
@@ -61,15 +61,15 @@ class ChessNet(nn.Module):
             nn.ReLU(), nn.Flatten(), nn.Linear(cfg.policy_channels * 64, cfg.n_moves))
         self.value_head = nn.Sequential(
             nn.Conv2d(c, 8, 1, bias=False), nn.BatchNorm2d(8), nn.ReLU(), nn.Flatten(),
-            nn.Linear(8 * 64, cfg.value_hidden), nn.ReLU(), nn.Linear(cfg.value_hidden, 3))
+            nn.Linear(8 * 64, cfg.value_hidden), nn.ReLU(), nn.Linear(cfg.value_hidden, 1), nn.Tanh())
 
     def forward(self, x):
         h = self.tower(self.stem(x))
-        return self.policy_head(h), self.value_head(h)
+        return self.policy_head(h), self.value_head(h).squeeze(-1)
 
 
 class Evaluator:
-    """Batched inference wrapper: planes -> (policy logits, WDL probs) as numpy."""
+    """Batched inference wrapper: planes -> (policy logits, values) as numpy."""
 
     def __init__(self, net: ChessNet, device: torch.device):
         self.net = net.to(device).eval()
@@ -84,8 +84,8 @@ class Evaluator:
         self.n_calls += 1
         self.n_positions += len(planes)
         x = torch.from_numpy(planes).to(self.device)
-        logits, wdl = self.net(x)
-        return logits.float().cpu().numpy(), torch.softmax(wdl.float(), -1).cpu().numpy()
+        logits, value = self.net(x)
+        return logits.float().cpu().numpy(), value.float().cpu().numpy()
 
 
 def save_checkpoint(path, net, optimizer=None, **extra):
