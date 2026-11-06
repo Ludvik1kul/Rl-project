@@ -12,9 +12,9 @@ All parameters and hyperparameters are in `config.py` (dataclasses grouped per c
 | `config.py` | All parameters (paths, model, MCTS, self-play, training, warm start, eval) |
 | `chess_env/encoding.py` | 20-plane board encoding, 4168-move policy index (side-to-move perspective) |
 | `model.py` | ResNet with policy + WDL value head; device auto-detection (xpu → cuda → mps → cpu) |
-| `mcts/gumbel.py` | Gumbel AlphaZero search (sequential halving with the mctx visit schedule, completed-Q improved policy, min-max Q normalisation); generator-based leaf batching across games |
-| `training/selfplay.py` | Batched self-play with playout-cap randomisation, resignation on the search value, and length adjudication |
-| `training/resign.py` | Resignation threshold calibrated on no-resign games (false positives <= 5%, AlphaGo Zero) |
+| `mcts/gumbel.py` | Gumbel AlphaZero search (sequential halving with the mctx visit schedule, completed-Q improved policy, Q mapped to [0, 1] by (q + 1) / 2 as in the paper's Go/chess setting; per-node min-max optional); generator-based leaf batching across games |
+| `training/selfplay.py` | Batched self-play with Gumbel noise at the root on every move, optional opening exploration by visit counts, optional playout-cap randomisation and resignation (both off by default), and length adjudication |
+| `training/resign.py` | Resignation threshold calibrated on no-resign games (false positives <= 5%, AlphaGo Zero); suspended when no threshold meets the target |
 | `training/logger.py` | JSONL + TensorBoard logging (per step, per iteration, per evaluation) |
 | `training/replay_buffer.py` | Compact ring buffer (uint8 planes, sparse policy targets) |
 | `training/losses.py` | Policy CE + WDL CE training step |

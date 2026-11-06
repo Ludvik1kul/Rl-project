@@ -149,6 +149,32 @@ def test_resign_calibration():
     assert cal.false_positive_rate(cal.threshold)[0] == 0.0
 
 
+def test_resign_suspended_when_no_threshold_is_safe():
+    from training.resign import RESIGN_OFF, ResignCalibrator
+    cfg = Config().selfplay
+    cfg.resign_min_samples, cfg.resign_window = 10, 100
+    cal = ResignCalibrator(cfg)
+    for _ in range(50):
+        cal.add(-0.995, True)
+        cal.add(-0.995, False)   # half of the would-be resignations at every threshold survive
+    cal.update()
+    assert cal.threshold == RESIGN_OFF
+    for _ in range(100):         # value estimates become reliable: the old records leave the window
+        cal.add(-0.98, True)
+    cal.update()
+    assert cfg.resign_bounds[0] <= cal.threshold <= cfg.resign_bounds[1]
+
+
+def test_selfplay_resign_off_and_opening_exploration():
+    cfg = _tiny_cfg()
+    assert not cfg.selfplay.resign and cfg.selfplay.explore_plies == 0   # defaults
+    cfg.selfplay.explore_plies = 1000      # sample every move by visit counts
+    ev = Evaluator(ChessNet(cfg.model), get_device(cfg.device))
+    _, stats = play_games(ev, cfg, 6, np.random.default_rng(0), resign_threshold=1.0)
+    assert len(stats) == 6
+    assert all(s["termination"] != "resign" and not s["resign_allowed"] for s in stats)
+
+
 def test_paired_match_between_agents():
     from evaluate import AgentPlayer, play_match
     cfg = _tiny_cfg()

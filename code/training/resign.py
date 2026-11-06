@@ -4,12 +4,16 @@ For every (game, side) of a no-resign game we store the lowest threshold that wo
 side resign: the minimum over all runs of `resign_consecutive` own moves of the largest search value
 in the run. A would-be resignation at threshold t is a false positive if the side did not lose.
 The threshold is set to the highest value whose false-positive rate stays within the target.
+If no threshold within the bounds meets the target, resignation is suspended (threshold RESIGN_OFF)
+until one does.
 """
 from collections import deque
 
 import numpy as np
 
 from config import SelfPlayConfig
+
+RESIGN_OFF = -1.0   # search values are >= -1, so `value < RESIGN_OFF` never triggers
 
 
 def trigger_level(values, k: int):
@@ -46,8 +50,10 @@ class ResignCalibrator:
                 best = float(t)
         if best is not None:
             self.threshold = best
-        elif self.false_positive_rate(self.threshold)[1] >= self.cfg.resign_min_samples:
-            self.threshold = lo   # too many false positives everywhere: resign as late as allowed
+        elif self.false_positive_rate(hi)[1] >= self.cfg.resign_min_samples:
+            # Enough evidence, yet no threshold down to the lowest bound meets the target: resigning
+            # would mislabel games as losses, so stop until the value estimates are reliable again.
+            self.threshold = RESIGN_OFF
 
     def state_dict(self):
         return {"threshold": self.threshold, "records": list(self.records)}

@@ -49,7 +49,15 @@ def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, r
     started = 0
 
     def new_game():
-        return GameState(allow_resign=rng.random() >= sp.no_resign_fraction)
+        # With resignation off every game is a no-resign game; all of them still feed the calibrator.
+        return GameState(allow_resign=sp.resign and rng.random() >= sp.no_resign_fraction)
+
+    def move_to_play(gs: GameState, res):
+        """The search's move, or in the first explore_plies plies a move sampled by root visit counts."""
+        visits = res.root.N
+        if gs.board.ply() >= sp.explore_plies or visits.sum() == 0:   # sum 0: single legal move
+            return res.move
+        return res.policy_moves[int(rng.choice(len(visits), p=visits / visits.sum()))]
 
     def apply_result(gs: GameState, is_full: bool, res) -> bool:
         """Records the search, checks resignation, plays the move. True if the game is over."""
@@ -71,7 +79,7 @@ def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, r
             gs.result = "0-1" if turn == chess.WHITE else "1-0"
             gs.termination = "resign"
         else:
-            gs.board.push(res.move)
+            gs.board.push(move_to_play(gs, res))
             gs.result = _game_result(gs, cfg)
         return gs.result is not None
 
