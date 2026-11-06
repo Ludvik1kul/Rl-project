@@ -30,7 +30,7 @@ class PathConfig:
     runs_dir: Path = ROOT / "runs"
     stockfish_path: Path = ROOT / "engines" / "stockfish" / ("stockfish.exe" if IS_WINDOWS else "stockfish")
     warmstart_pgn_dir: Path = ROOT / "data" / "lichess_elite"
-    warmstart_dataset: Path = ROOT / "data" / "warmstart.npz"
+    warmstart_dataset: Path = ROOT / "data" / "warmstart_sf.npz"   # Stockfish-labelled (warmstart.npz = old)
 
 
 @dataclass
@@ -118,8 +118,15 @@ class TrainConfig:
 @dataclass
 class WarmStartConfig:
     min_elo: int = 2000          # both players at least this rating
-    max_games: int = 50_000      # ~80 positions/game, ~1.3KB each -> ~5GB in RAM
+    max_games: int = 40_000      # games sampled from the PGNs
+    positions_per_game: int = 10     # random positions per game (fewer, less correlated positions)
     skip_first_plies: int = 6    # opening positions are low-information
+    # Value labels from Stockfish: its WDL estimate (UCI_ShowWDL) as P(win) - P(loss) for the side to move.
+    sf_nodes: int = 50_000       # search budget per position
+    sf_workers: int = 7          # parallel single-threaded Stockfish processes
+    sf_hash_mb: int = 16
+    # Value target = sf_value_weight * Stockfish value + (1 - sf_value_weight) * game result (set at training).
+    sf_value_weight: float = 1.0
     epochs: int = 3
     batch_size: int = 1024
     lr: float = 2e-3
@@ -165,7 +172,7 @@ class Config:
     warmstart: WarmStartConfig = field(default_factory=WarmStartConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     train_eval: TrainEvalConfig = field(default_factory=TrainEvalConfig)
-    run_name: str = "main"
+    run_name: str = "v2"         # v2: scalar tanh value head, Stockfish-labelled warm start
 
     @property
     def run_dir(self) -> Path:

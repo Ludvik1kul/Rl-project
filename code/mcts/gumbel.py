@@ -6,7 +6,7 @@ Interior nodes: deterministic selection argmax(pi'(a) - N(a) / (1 + sum N)),
 where pi' = softmax(logits + sigma(completed Q)).
 
 A search is a generator: it yields encoded leaf planes and expects
-(policy_logits, wdl_probs) to be sent back. `run_batched` drives many such
+(policy_logits, value) to be sent back. `run_batched` drives many such
 generators at once so all leaves are evaluated in a single batch.
 All values are in [-1, 1] from the perspective of the side to move at the node.
 """
@@ -21,9 +21,9 @@ from config import MCTSConfig
 
 
 class Node:
-    __slots__ = ("moves", "logits", "prior", "N", "W", "children", "value", "wdl", "terminal")
+    __slots__ = ("moves", "logits", "prior", "N", "W", "children", "value", "terminal")
 
-    def __init__(self, moves, logits, value, wdl, terminal=False):
+    def __init__(self, moves, logits, value, terminal=False):
         self.moves = moves
         self.logits = logits                     # raw logits over legal moves
         if len(moves):
@@ -35,7 +35,6 @@ class Node:
         self.W = np.zeros(len(moves), dtype=np.float64)
         self.children = [None] * len(moves)
         self.value = value                       # network (or terminal) value estimate
-        self.wdl = wdl
         self.terminal = terminal
 
 
@@ -68,10 +67,10 @@ def _expand(board: chess.Board):
     """Generator: creates a node for the current board, querying the network if needed."""
     tv = _terminal_value(board)
     if tv is not None:
-        return Node([], np.zeros(0), tv, None, terminal=True)
+        return Node([], np.zeros(0), tv, terminal=True)
     moves, idx = legal_move_indices(board)
-    logits, wdl = yield encode_board(board)
-    return Node(moves, logits[idx].astype(np.float64), float(wdl[0] - wdl[2]), wdl)
+    logits, value = yield encode_board(board)
+    return Node(moves, logits[idx].astype(np.float64), float(value))
 
 
 def completed_q(node: Node) -> np.ndarray:
@@ -186,11 +185,11 @@ def run_batched(evaluator, generators):
             results[i] = stop.value
     while requests:
         ids = list(requests)
-        logits, wdl = evaluator(np.stack([requests[i] for i in ids]))
+        logits, values = evaluator(np.stack([requests[i] for i in ids]))
         nxt = {}
         for k, i in enumerate(ids):
             try:
-                nxt[i] = generators[i].send((logits[k], wdl[k]))
+                nxt[i] = generators[i].send((logits[k], values[k]))
             except StopIteration as stop:
                 results[i] = stop.value
         requests = nxt

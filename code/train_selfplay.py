@@ -203,9 +203,9 @@ def main(cfg: Config):
             n_steps = tc.train_steps_per_iteration if tc.target_reuse <= 0 else \
                 int(np.clip(round(tc.target_reuse * new_positions / tc.batch_size), 1, tc.max_train_steps_per_iteration))
             for _ in range(n_steps):
-                planes, pi, pp, wdl = buffer.sample(tc.batch_size, rng)
+                planes, pi, pp, value = buffer.sample(tc.batch_size, rng)
                 target = dense_policy_target(pi, pp, cfg.model.n_moves)
-                m = train_step(net, opt, planes, target, wdl, device, tc.value_loss_weight)
+                m = train_step(net, opt, planes, target, value, device, tc.value_loss_weight)
                 global_step += 1
                 losses.append(m)
                 logger.write("steps", global_step, m | {"lr": opt.param_groups[0]["lr"], "iteration": iteration + 1},

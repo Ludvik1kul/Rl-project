@@ -35,12 +35,12 @@ def bench(device: str, cfg: Config):
     bs = cfg.train.batch_size
     planes = np.random.rand(bs, cfg.model.in_planes, 8, 8).astype(np.float32)
     moves_idx = np.random.randint(0, cfg.model.n_moves, bs)
-    wdl = np.random.randint(0, 3, bs)
+    value = np.random.uniform(-1, 1, bs).astype(np.float32)
     for _ in range(3):
-        train_step(net, opt, planes, moves_idx, wdl, dev)
+        train_step(net, opt, planes, moves_idx, value, dev)
     t = time.time()
     for _ in range(20):
-        train_step(net, opt, planes, moves_idx, wdl, dev)
+        train_step(net, opt, planes, moves_idx, value, dev)
     steps = 20 / (time.time() - t)
     print(f"{device}: inference {infer:.0f} pos/s | self-play {moves:.0f} moves/s | train {steps:.2f} steps/s (bs {bs})")
 

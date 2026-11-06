@@ -83,6 +83,11 @@ def legal_move_indices(board: chess.Board):
     return moves, np.fromiter((encode_move(m, turn) for m in moves), dtype=np.int64, count=len(moves))
 
 
+def outcome_value(result: str, turn: chess.Color) -> float:
+    """Game result as a value for the side to move: +1 win, 0 draw, -1 loss."""
+    return {0: 1.0, 1: 0.0, 2: -1.0}[outcome_wdl(result, turn)]
+
+
 def outcome_wdl(result: str, turn: chess.Color) -> int:
     """Game result string -> class index from `turn`'s perspective: 0 win, 1 draw, 2 loss."""
     if result == "1/2-1/2":

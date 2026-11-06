@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import chess
 import numpy as np
 
-from chess_env.encoding import encode_board, encode_move, outcome_wdl
+from chess_env.encoding import encode_board, encode_move, outcome_value
 from config import Config
 from mcts.gumbel import gumbel_search
 from training.replay_buffer import compress_planes, sparse_policy
@@ -107,12 +107,12 @@ def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, r
     slots = []
     fill(slots)
     while slots:
-        logits, wdl = evaluator(np.stack([s[3] for s in slots]))
+        logits, values = evaluator(np.stack([s[3] for s in slots]))
         still = []
         for k, slot in enumerate(slots):
             gs, gen, is_full, _ = slot
             try:
-                slot[3] = gen.send((logits[k], wdl[k]))
+                slot[3] = gen.send((logits[k], values[k]))
                 still.append(slot)
                 continue
             except StopIteration as stop:
@@ -125,11 +125,11 @@ def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, r
         slots = still
         fill(slots)
 
-    planes, pol_idx, pol_p, wdl, stats = [], [], [], [], []
+    planes, pol_idx, pol_p, value, stats = [], [], [], [], []
     for gs in finished:
         for pl, pi, pp, turn, *_ in gs.records:
             planes.append(pl); pol_idx.append(pi); pol_p.append(pp)
-            wdl.append(outcome_wdl(gs.result, turn))
+            value.append(outcome_value(gs.result, turn))
         z = {chess.WHITE: {"1-0": 1, "0-1": -1}.get(gs.result, 0)}
         z[chess.BLACK] = -z[chess.WHITE]
         stats.append({
@@ -143,5 +143,5 @@ def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, r
         })
     if not planes:
         return None, stats
-    samples = (np.stack(planes), np.stack(pol_idx), np.stack(pol_p), np.array(wdl, dtype=np.int8))
+    samples = (np.stack(planes), np.stack(pol_idx), np.stack(pol_p), np.array(value, dtype=np.float32))
     return samples, stats

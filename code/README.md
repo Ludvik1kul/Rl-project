@@ -11,15 +11,15 @@ All parameters and hyperparameters are in `config.py` (dataclasses grouped per c
 |---|---|
 | `config.py` | All parameters (paths, model, MCTS, self-play, training, warm start, eval) |
 | `chess_env/encoding.py` | 20-plane board encoding, 4168-move policy index (side-to-move perspective) |
-| `model.py` | ResNet with policy + WDL value head; device auto-detection (xpu → cuda → mps → cpu) |
+| `model.py` | ResNet with policy head and a scalar tanh value head (AlphaZero); device auto-detection (xpu → cuda → mps → cpu) |
 | `mcts/gumbel.py` | Gumbel AlphaZero search (sequential halving with the mctx visit schedule, completed-Q improved policy, min-max Q normalisation); generator-based leaf batching across games |
 | `training/selfplay.py` | Batched self-play with playout-cap randomisation, resignation on the search value, and length adjudication |
 | `training/resign.py` | Resignation threshold calibrated on no-resign games (false positives <= 5%, AlphaGo Zero) |
 | `training/logger.py` | JSONL + TensorBoard logging (per step, per iteration, per evaluation) |
 | `training/replay_buffer.py` | Compact ring buffer (uint8 planes, sparse policy targets) |
-| `training/losses.py` | Policy CE + WDL CE training step |
+| `training/losses.py` | Policy cross-entropy + value MSE training step |
 | `download.py` | Downloads Stockfish and Lichess Elite PGNs |
-| `warmstart.py` | Supervised pretraining on Elite games |
+| `warmstart.py` | Supervised pretraining on Elite games: human move as policy target, Stockfish 19 WDL estimate (P(win) − P(loss)) as value target |
 | `train_selfplay.py` | Main loop: self-play → buffer → train → checkpoint → periodic Elo evaluation (exactly resumable) |
 | `evaluate.py` | Parallel, colour-paired matches vs. Stockfish (UCI_Elo / Skill Level) or checkpoints, Elo with 95% CI |
 | `benchmark.py` | CPU vs. GPU (Intel XPU / Apple MPS) throughput (inference, self-play, training) |
@@ -31,14 +31,14 @@ pip install -r requirements.txt
 python -m pytest tests
 python download.py stockfish
 python download.py elite          # months set in DownloadConfig.elite_months
-python warmstart.py build
-python warmstart.py train         # -> runs/main/warmstart.pt
+python warmstart.py build         # samples positions, labels them with Stockfish -> data/warmstart_sf.npz
+python warmstart.py train         # -> runs/v2/warmstart.pt
 python train_selfplay.py          # runs until stopped; Ctrl+C and rerun to resume
-python evaluate.py stockfish ../runs/main/latest.pt
-python evaluate.py match ../runs/main/checkpoints/iter_00100.pt ../runs/main/checkpoints/iter_00010.pt
+python evaluate.py stockfish ../runs/v2/latest.pt
+python evaluate.py match ../runs/v2/checkpoints/iter_00100.pt ../runs/v2/checkpoints/iter_00010.pt
 ```
 Training logs are written to `runs/<run_name>/`:
-- `steps.jsonl`: every gradient step (loss, policy/value loss and accuracy, gradient norm, lr)
+- `steps.jsonl`: every gradient step (loss, policy/value loss, policy accuracy, value MAE, gradient norm, lr)
 - `log.jsonl`: every iteration (games, terminations, search-target entropy and KL to the prior,
   value error, resignation threshold and false-positive rate, buffer reuse, timings)
 - `eval.jsonl`: every `TrainEvalConfig.every` iterations: Elo vs. Stockfish (opponent set to the previous
