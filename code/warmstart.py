@@ -10,6 +10,7 @@ import time
 import chess.pgn
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from chess_env.encoding import encode_board, encode_move, outcome_wdl
@@ -100,7 +101,8 @@ def train(cfg: Config):
             sched.step()
             if s % 20 == 0:
                 bar.set_postfix({k: f"{v:.3f}" for k, v in m.items()} | {"lr": f"{sched.get_last_lr()[0]:.1e}"})
-        tqdm.write(f"epoch {epoch + 1} val: {evaluate(net, planes, moves, wdl, val, device)}")
+        v = evaluate(net, planes, moves, wdl, val, device)
+        tqdm.write(f"epoch {epoch + 1} val: " + "  ".join(f"{k} {x:.4f}" for k, x in v.items()))
 
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     save_checkpoint(cfg.run_dir / "warmstart.pt", net)
@@ -109,14 +111,22 @@ def train(cfg: Config):
 
 @torch.inference_mode()
 def evaluate(net, planes, moves, wdl, ix, device, bs=2048):
+    """Validation metrics: the same losses as train_step (cross-entropy, averaged per position) and accuracies."""
     net.eval()
+    policy_loss = value_loss = 0.0
     correct = vcorrect = 0
     for i in tqdm(range(0, len(ix), bs), desc="val", leave=False, dynamic_ncols=True):
         b = np.sort(ix[i:i + bs])
         logits, wl = net(torch.from_numpy(decompress_planes(planes[b])).to(device))
-        correct += (logits.argmax(-1).cpu().numpy() == moves[b]).sum()
-        vcorrect += (wl.argmax(-1).cpu().numpy() == wdl[b]).sum()
-    return {"move_acc": correct / len(ix), "wdl_acc": vcorrect / len(ix)}
+        mv = torch.from_numpy(moves[b].astype(np.int64)).to(device)
+        res = torch.from_numpy(wdl[b].astype(np.int64)).to(device)
+        policy_loss += F.cross_entropy(logits.float(), mv, reduction="sum").item()
+        value_loss += F.cross_entropy(wl.float(), res, reduction="sum").item()
+        correct += (logits.argmax(-1) == mv).sum().item()
+        vcorrect += (wl.argmax(-1) == res).sum().item()
+    n = len(ix)
+    return {"policy_loss": policy_loss / n, "value_loss": value_loss / n,
+            "move_acc": correct / n, "wdl_acc": vcorrect / n}
 
 
 if __name__ == "__main__":
