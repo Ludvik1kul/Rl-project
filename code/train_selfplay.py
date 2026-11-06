@@ -38,11 +38,12 @@ def _mean(xs):
     return float(np.mean(xs)) if len(xs) else float("nan")
 
 
-def play_iteration(evaluator, cfg: Config, rng, threshold):
+def play_iteration(evaluator, cfg: Config, rng, calibrator):
     """Plays batches of games until min_positions_per_iteration is reached (at least one batch)."""
     samples, stats = [], []
     while True:
-        s, st = play_games(evaluator, cfg, cfg.selfplay.games_per_iteration, rng, threshold)
+        s, st = play_games(evaluator, cfg, cfg.selfplay.games_per_iteration, rng, calibrator.threshold,
+                           calibrator.enabled)
         stats += st
         if s is not None:
             samples.append(s)
@@ -65,7 +66,9 @@ def selfplay_metrics(stats, calibrator):
         "search/target_entropy": _mean([e for e, _, _ in search]),
         "search/kl_target_prior": _mean([kl for _, kl, _ in search]),
         "search/value_mse_vs_result": _mean([se for _, _, se in search]),
-        "resign/threshold": calibrator.threshold, "resign/false_positive_rate": fp, "resign/fp_samples": fp_n,
+        "resign/enabled": int(calibrator.enabled), "resign/threshold": calibrator.threshold,
+        "resign/false_positive_rate": fp, "resign/fp_samples": fp_n,
+        "resign/fp_rate_at_min_threshold": calibrator.false_positive_rate(calibrator.cfg.resign_bounds[0])[0],
         "resign/no_resign_games": sum(not s["resign_allowed"] for s in stats),
     }
     for t in ("checkmate", "stalemate", "insufficient_material", "seventyfive_moves", "fivefold_repetition",
@@ -183,7 +186,7 @@ def main(cfg: Config):
     while iteration < tc.n_iterations:
         t0 = time.time()
         calls0, pos0 = evaluator.n_calls, evaluator.n_positions
-        samples, stats = play_iteration(evaluator, cfg, rng, calibrator.threshold)
+        samples, stats = play_iteration(evaluator, cfg, rng, calibrator)
         new_positions = 0 if samples is None else len(samples[3])
         if samples is not None:
             buffer.add(*samples)

@@ -38,10 +38,12 @@ def _entropy(p):
     return float(-(p * np.log(p)).sum())
 
 
-def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, resign_threshold=None):
+def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, resign_threshold=None,
+               resign_enabled: bool = True):
     """Plays n_games of self-play. Returns (training samples, list of game stats).
 
     Resignation uses the root search value and `resign_threshold` (default: the configured one).
+    With resign_enabled=False every game is played out (and counts as a no-resign game).
     """
     sp, mc = cfg.selfplay, cfg.mcts
     threshold = sp.resign_threshold if resign_threshold is None else resign_threshold
@@ -49,7 +51,7 @@ def play_games(evaluator, cfg: Config, n_games: int, rng: np.random.Generator, r
     started = 0
 
     def new_game():
-        return GameState(allow_resign=rng.random() >= sp.no_resign_fraction)
+        return GameState(allow_resign=resign_enabled and rng.random() >= sp.no_resign_fraction)
 
     def apply_result(gs: GameState, is_full: bool, res) -> bool:
         """Records the search, checks resignation, plays the move. True if the game is over."""

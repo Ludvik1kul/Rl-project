@@ -141,12 +141,19 @@ def test_resign_calibration():
     cfg = Config().selfplay
     cfg.resign_min_samples = 10
     cal = ResignCalibrator(cfg)
+    assert not cal.enabled                   # no resignation before calibration
     for _ in range(50):
         cal.add(-0.98, True)     # deep trouble: always lost
         cal.add(-0.85, False)    # only mildly bad: survived
     cal.update()
+    assert cal.enabled
     assert -0.98 < cal.threshold <= -0.85   # resign below -0.85 only, false positives excluded
     assert cal.false_positive_rate(cal.threshold)[0] == 0.0
+    bad = ResignCalibrator(cfg)
+    for _ in range(50):
+        bad.add(-1.0, False)     # even the most hopeless-looking positions survive
+    bad.update()
+    assert not bad.enabled
 
 
 def test_paired_match_between_agents():
