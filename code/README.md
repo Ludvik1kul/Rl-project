@@ -92,6 +92,10 @@ Each run directory `runs/<run_name>/` gets:
   snapshot, and seconds per move with the raw policy and with search
 - `tensorboard/`: the same numbers. Start with `tensorboard --logdir runs` and open http://localhost:6006.
 
+The warm start logs the same way to `runs/<run_name>/warmstart_logs/`: every gradient step, validation
+metrics per epoch, and a match against Stockfish after each epoch (`WarmStartConfig.eval_*`: 30 games vs.
+UCI_Elo 1500 at 0.1 s/move by default). It saves `warmstart.pt` and `warmstart_epochN.pt` after every epoch.
+
 `latest.pt` and `buffer.npz` are written together every `checkpoint_every` iterations, with the RNG
 states, so a rerun resumes exactly from the last checkpoint.
 

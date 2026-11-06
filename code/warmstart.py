@@ -22,7 +22,9 @@ from tqdm import tqdm
 
 from chess_env.encoding import encode_board, encode_move, outcome_value
 from config import Config
+from evaluate import AgentPlayer, StockfishPlayer, elo_estimate, play_match
 from model import ChessNet, get_device, save_checkpoint
+from training.logger import RunLogger
 from training.losses import train_step
 from training.replay_buffer import compress_planes, decompress_planes
 
@@ -176,6 +178,12 @@ def train(cfg: Config):
 
     At each epoch, it shuffles the training indices and walks trough them in batches cfg.warmstart.batch_size
 
+    Logging (runs/<run_name>/warmstart_logs, see training/logger.py; TensorBoard in its tensorboard/):
+        - steps.jsonl   every gradient step: losses, accuracies, gradient norm, lr
+        - log.jsonl     every epoch: validation metrics (see evaluate)
+        - eval.jsonl    every epoch: match against Stockfish (cfg.warmstart.eval_*), Elo with 95% CI
+    The weights are saved after every epoch (warmstart.pt, plus warmstart_epochN.pt).
+
     At each step, losses.train_step is called:
         - policy loss   = cross-entropy against the human move;
         - value loss    = mean squared error against the value target, which is
@@ -203,6 +211,11 @@ def train(cfg: Config):
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, ws.lr, total_steps=ws.epochs * steps_per_epoch)
     print(f"Device {device}, {len(tr)} train / {len(val)} val positions, value target "
           f"{ws.sf_value_weight:g} x Stockfish + {1 - ws.sf_value_weight:g} x result")
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = cfg.run_dir / "warmstart_logs"
+    log_dir.mkdir(exist_ok=True)
+    logger = RunLogger(log_dir)
+    step = 0
 
     for epoch in range(ws.epochs):
         rng.shuffle(tr)
@@ -212,14 +225,39 @@ def train(cfg: Config):
             ix = np.sort(tr[s * ws.batch_size:(s + 1) * ws.batch_size])
             m = train_step(net, opt, decompress_planes(planes[ix]), moves[ix].astype(np.int64),
                            value[ix], device, cfg.train.value_loss_weight)
+            step += 1
+            logger.write("steps", step, m | {"lr": sched.get_last_lr()[0], "epoch": epoch + 1}, tb_prefix="train")
             sched.step()
             if s % 20 == 0:
                 bar.set_postfix({k: f"{v:.3f}" for k, v in m.items()} | {"lr": f"{sched.get_last_lr()[0]:.1e}"})
-        tqdm.write(f"epoch {epoch + 1} val: {evaluate(net, planes, moves, d['sf_move'], value, val, device)}")
-
-    cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    save_checkpoint(cfg.run_dir / "warmstart.pt", net)
+        metrics = evaluate(net, planes, moves, d['sf_move'], value, val, device)
+        tqdm.write(f"epoch {epoch + 1} val: {metrics}")
+        logger.write("log", epoch + 1, {f"val/{k}": v for k, v in metrics.items()} | {"global_step": step})
+        save_checkpoint(cfg.run_dir / "warmstart.pt", net, epoch=epoch + 1)
+        save_checkpoint(cfg.run_dir / f"warmstart_epoch{epoch + 1}.pt", net, epoch=epoch + 1)
+        if ws.eval_games:
+            entry = match_stockfish(cfg, net, device, np.random.default_rng([cfg.train.seed, epoch]))
+            logger.write("eval", epoch + 1, entry | {"global_step": step})
+            tqdm.write(f"epoch {epoch + 1} vs Stockfish {ws.eval_elo}: W/D/L {entry['wins']}/{entry['draws']}/"
+                       f"{entry['losses']}, Elo {entry['elo']:.0f} [{entry['elo_lo']:.0f}, {entry['elo_hi']:.0f}]")
+    logger.close()
     print(f"Saved {cfg.run_dir / 'warmstart.pt'}")
+
+
+def match_stockfish(cfg: Config, net, device, rng):
+    """cfg.warmstart.eval_games colour-paired games against Stockfish at UCI_Elo eval_elo (evaluate.play_match)."""
+    ws = cfg.warmstart
+    agent = AgentPlayer(cfg, net, ws.eval_sims, device)
+    t0 = time.time()
+    sf = StockfishPlayer(cfg, elo=ws.eval_elo, move_time=ws.eval_time)
+    try:
+        w, d, l = play_match(agent, sf, cfg, rng, ws.eval_games, verbose=False)
+    finally:
+        sf.close()
+    diff, lo, hi = elo_estimate(w, d, l)
+    return {"opponent_elo": ws.eval_elo, "wins": w, "draws": d, "losses": l, "score": (w + 0.5 * d) / (w + d + l),
+            "elo": ws.eval_elo + diff, "elo_lo": ws.eval_elo + lo, "elo_hi": ws.eval_elo + hi,
+            "match_sec": time.time() - t0}
 
 
 @torch.inference_mode()  # no autograd graph: faster, less memory, no accidental training
@@ -241,8 +279,9 @@ def evaluate(net, planes, moves, sf_moves, value, ix, device, bs=2048):
         se += (err ** 2).sum()
         ae += np.abs(err).sum()
     n = len(ix)
-    return {"policy_loss": round(ce / n, 4), "move_acc": round(human / n, 4), "sf_move_acc": round(sf / n, 4), "value_mse": round(se / n, 4),
-            "value_mae": round(ae / n, 4), "value_mse_const": round(float(value[ix].var()), 4)}
+    metrics = {"policy_loss": ce / n, "move_acc": human / n, "sf_move_acc": sf / n, "value_mse": se / n,
+               "value_mae": ae / n, "value_mse_const": value[ix].var()}
+    return {k: round(float(v), 4) for k, v in metrics.items()}
 
 
 def apply_overrides(cfg: Config, args):
