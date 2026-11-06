@@ -143,6 +143,11 @@ class WarmStartConfig:
     sf_hash_mb: int = 16
     # Value target = sf_value_weight * Stockfish value + (1 - sf_value_weight) * game result (set at training).
     sf_value_weight: float = 1.0
+    # After every epoch: a match against Stockfish (0 games = off), logged to runs/<run>/warmstart_logs.
+    eval_games: int = 30
+    eval_elo: int = 1500         # Stockfish UCI_Elo
+    eval_time: float = 0.1       # Stockfish seconds per move
+    eval_sims: int = 64          # agent simulations per move
     epochs: int = 3
     batch_size: int = 1024
     lr: float = 2e-3
