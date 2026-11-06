@@ -20,6 +20,27 @@ from training.replay_buffer import compress_planes, decompress_planes
 
 
 def build_dataset(cfg: Config):
+    """
+    Reads each .pgn file in ROOT / data / lichess_elite, one at time, with python-chess.
+    
+    It keeps a game only if it finished with a real results ("1-0", "0-1", "1/2-1/2") and
+    both players are rated at least cfg.warmstart.min_elo. It stops after cfg.warmstart.max_games
+
+    Then, for each game, it replay the match and for every position (move in the game), it saves:
+    - planes :   first encoded to uint8 via chess_env.encoding.encode_board
+    - move   :   also encoded via chess_env.encoding.encode_move
+    - wdl    :   chess_env.encoding.outcome_wdl
+    - game   :   the game id, used later for the validation split
+
+    Finally everything is saved in ROOT / data /. In particular:
+    - planes    in np.int8
+    - moves     in np.int16
+    - wdl       in np.int8
+    - game      in np.int32
+
+    Resources: 
+    python-chess doc: https://python-chess.readthedocs.io/en/latest/index.html
+    """
     ws = cfg.warmstart
     planes, moves, wdl, game_ids = [], [], [], []
     n_games = 0
@@ -38,6 +59,9 @@ def build_dataset(cfg: Config):
                     continue
                 if result not in ("1-0", "0-1", "1/2-1/2") or min(elos) < ws.min_elo:
                     continue
+
+                # Replay the game (already filtered) from scratch. 
+                # See https://python-chess.readthedocs.io/en/latest/_modules/chess/pgn.html#GameNode.board
                 board = game.board()
                 for ply, move in enumerate(game.mainline_moves()):
                     if ply >= ws.skip_first_plies:
@@ -63,6 +87,8 @@ def split_by_game(d, n: int, val_fraction: float, rng: np.random.Generator):
 
     Datasets built before game ids were stored keep positions in game order, so the last block of
     positions is used as validation (at most one game straddles the boundary).
+
+    Hyperparameter for % of validation in cfg.warmstart.val_fraction
     """
     if "game" in d:
         game = d["game"]
@@ -75,6 +101,27 @@ def split_by_game(d, n: int, val_fraction: float, rng: np.random.Generator):
 
 
 def train(cfg: Config):
+    """
+    Builds a model.ChessNet:
+        - 8 residual block and 96 channels, 
+        - policy head with 4 168 logits
+        - value head with 3 WDL logits
+    
+    Trained with AdamW optimizer with a OneCycle scheduler for a dynamic learning rate.
+    Learning rate in cfg.warmstart.lr (default at 2e-3)
+    Learning rate decay in cfg.train.weight_decay (default at 1e-4).
+
+    At each epoch, it shuffles the training indices and walks trough them in batches cfg.warmstart.batch_size
+
+    At each step, losses.train_step is called and it uses negative log likelihood loss:
+        - policy loss   = cross-entropy against the human move;
+        - value loss    = cross-entropy against W/D/L;
+        - loss          = policy loss + values_loss_weigth * value loss (where values_loss_weight is cfg.train.value_loss_weight, default at 1)
+
+
+    Resources: 
+    - https://docs.pytorch.org/docs/2.15/generated/torch.optim.lr_scheduler.OneCycleLR.html
+    """
     ws = cfg.warmstart
     rng = np.random.default_rng(cfg.train.seed)
     torch.manual_seed(cfg.train.seed)
@@ -86,6 +133,8 @@ def train(cfg: Config):
     device = get_device(cfg.device)
     net = ChessNet(cfg.model).to(device)
     steps_per_epoch = len(tr) // ws.batch_size
+    # NOTE: AdamW optimizer with a OneCycle scheduler for a dynamic learning rate 
+    # See docs: https://docs.pytorch.org/docs/2.15/generated/torch.optim.lr_scheduler.OneCycleLR.html
     opt = torch.optim.AdamW(net.parameters(), lr=ws.lr, weight_decay=cfg.train.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, ws.lr, total_steps=ws.epochs * steps_per_epoch)
     print(f"Device {device}, {len(tr)} train / {n_val} val positions")
@@ -94,6 +143,7 @@ def train(cfg: Config):
         rng.shuffle(tr)
         bar = tqdm(range(steps_per_epoch), desc=f"epoch {epoch + 1}/{ws.epochs}", dynamic_ncols=True)
         for s in bar:
+            # NOTE: within a batch, indices are sorted only to speed up memory reads
             ix = np.sort(tr[s * ws.batch_size:(s + 1) * ws.batch_size])
             m = train_step(net, opt, decompress_planes(planes[ix]), moves[ix].astype(np.int64),
                            wdl[ix], device, cfg.train.value_loss_weight)
@@ -107,7 +157,7 @@ def train(cfg: Config):
     print(f"Saved {cfg.run_dir / 'warmstart.pt'}")
 
 
-@torch.inference_mode()
+@torch.inference_mode()  # no autograd graph: faster, less memory, no accidental training
 def evaluate(net, planes, moves, wdl, ix, device, bs=2048):
     net.eval()
     correct = vcorrect = 0

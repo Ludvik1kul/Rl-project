@@ -44,7 +44,11 @@ class ResBlock(nn.Module):
 
 
 class ChessNet(nn.Module):
-    """Outputs policy logits (n_moves) and WDL logits (3) for the side to move."""
+    """
+    Outputs policy logits (n_moves) and WDL logits (3) for the side to move.
+
+    Based on Alphazero architecture (Silver et al. 2018), scaled down. 
+    """
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
