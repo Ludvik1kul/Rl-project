@@ -60,8 +60,8 @@ class ChessNet(nn.Module):
             nn.Conv2d(c, cfg.policy_channels, 1, bias=False), nn.BatchNorm2d(cfg.policy_channels),
             nn.ReLU(), nn.Flatten(), nn.Linear(cfg.policy_channels * 64, cfg.n_moves))
         self.value_head = nn.Sequential(
-            nn.Conv2d(c, 8, 1, bias=False), nn.BatchNorm2d(8), nn.ReLU(), nn.Flatten(),
-            nn.Linear(8 * 64, cfg.value_hidden), nn.ReLU(), nn.Linear(cfg.value_hidden, 1), nn.Tanh())
+            nn.Conv2d(c, cfg.value_channels, 1, bias=False), nn.BatchNorm2d(cfg.value_channels), nn.ReLU(),
+            nn.Flatten(), nn.Linear(cfg.value_channels * 64, cfg.value_hidden), nn.ReLU(), nn.Linear(cfg.value_hidden, 1), nn.Tanh())
 
     def forward(self, x):
         h = self.tower(self.stem(x))
