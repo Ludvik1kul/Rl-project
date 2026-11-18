@@ -1,8 +1,8 @@
 """Main self-play training loop: generate games -> replay buffer -> train -> gate -> checkpoint -> evaluate.
 
 Gating (GateConfig): every `gate.every` iterations the training net plays the best net so far, and replaces it
-in runs/<run_name>/best.pt only if it scores at least `gate.accept_score`. Self-play and training always use
-the training net; the gate only decides which weights count as the model.
+in runs/<run_name>/best.pt only if it scores at least `gate.accept_score`. Training always updates the
+training net. Self-play uses the training net, or the best net with `gate.selfplay_best` (AlphaGo Zero).
 
 Resumes automatically from runs/<run_name>/latest.pt and buffer.npz, which are always written together
 (with RNG states and the resignation calibration), so a resumed run continues where it was saved.
@@ -40,6 +40,11 @@ def _atomic_save(path, write):
 
 def _mean(xs):
     return float(np.mean(xs)) if len(xs) else float("nan")
+
+
+def lr_at(tc, step: int) -> float:
+    """Step-decay schedule: tc.lr times lr_gamma for every milestone already reached."""
+    return tc.lr * tc.lr_gamma ** sum(step >= m for m in tc.lr_milestones)
 
 
 def play_iteration(evaluator, cfg: Config, rng, calibrator):
@@ -178,11 +183,13 @@ def main(cfg: Config):
     best_net = ChessNet(cfg.model).to(device) if cfg.gate.every else None
     gate_state = {"best_iteration": 0, "promotions": 0, "gates": 0}
     iteration = global_step = 0
+    elapsed = 0.0   # training-loop seconds over all restarts, for time_limit_hours
 
     if (run / "latest.pt").exists():
         state = load_checkpoint(run / "latest.pt", net, opt, map_location=device)
         iteration = state["iteration"]
         global_step = state.get("global_step", 0)
+        elapsed = state.get("elapsed_sec", 0.0)
         if "rng" in state:
             rng.bit_generator.state = state["rng"]
             torch.set_rng_state(state["torch_rng"])
@@ -219,7 +226,8 @@ def main(cfg: Config):
     def checkpoint():
         extra = {"best": best_net.state_dict(), "gate": gate_state} if best_net is not None else {}
         _atomic_save(run / "latest.pt", lambda f: save_checkpoint(
-            f, net, opt, iteration=iteration, global_step=global_step, rng=rng.bit_generator.state,
+            f, net, opt, iteration=iteration, global_step=global_step, elapsed_sec=time.time() - t_start,
+            rng=rng.bit_generator.state,
             torch_rng=torch.get_rng_state(), resign=calibrator.state_dict(), elo=elo_state, **extra))
         _atomic_save(run / "buffer.npz", buffer.save)
 
@@ -243,12 +251,15 @@ def main(cfg: Config):
               f"vs SF {entry['opponent_elo']} W/D/L {entry['wins']}/{entry['draws']}/{entry['losses']}")
 
     logger = RunLogger(run)
-    evaluator = Evaluator(net, device)
+    if cfg.gate.selfplay_best and best_net is None:
+        raise ValueError("gate.selfplay_best needs gating on (gate.every > 0)")
+    # best_net is updated in place on promotion, so this evaluator always plays the current best weights.
+    evaluator = Evaluator(best_net if cfg.gate.selfplay_best else net, device)
     if iteration == 0:
         save_checkpoint(run / "checkpoints" / "iter_00000.pt", net, iteration=0)
         if te.every and te.at_start:
             evaluate()
-    t_start = time.time()
+    t_start = time.time() - elapsed
     while iteration < tc.n_iterations:
         t0 = time.time()
         calls0, pos0 = evaluator.n_calls, evaluator.n_positions
@@ -269,6 +280,8 @@ def main(cfg: Config):
             n_steps = tc.train_steps_per_iteration if tc.target_reuse <= 0 else \
                 int(np.clip(round(tc.target_reuse * new_positions / tc.batch_size), 1, tc.max_train_steps_per_iteration))
             for _ in range(n_steps):
+                for group in opt.param_groups:
+                    group["lr"] = lr_at(tc, global_step)
                 planes, pi, pp, value = buffer.sample(tc.batch_size, rng)
                 target = dense_policy_target(pi, pp, cfg.model.n_moves)
                 m = train_step(net, opt, planes, target, value, device, tc.value_loss_weight)
@@ -283,6 +296,7 @@ def main(cfg: Config):
         entry = {
             "iteration": iteration, "global_step": global_step,
             "timing/play_sec": t_play, "timing/train_sec": t_train,
+            "timing/elapsed_hours": (time.time() - t_start) / 3600, "train_mean/lr": lr_at(tc, global_step),
             "timing/selfplay_sec_per_move": t_play / max(plies, 1),
             "timing/selfplay_moves_per_sec": plies / max(t_play, 1e-9),
             "timing/nn_positions_per_sec": (evaluator.n_positions - pos0) / max(t_play, 1e-9),

@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 class RunLogger:
     def __init__(self, run_dir):
         self.files = {name: open(run_dir / f"{name}.jsonl", "a") for name in ("steps", "log", "eval", "gate")}
-        self.tb = SummaryWriter(str(run_dir / "tensorboard"))
+        self.tb = SummaryWriter(str(run_dir / "tensorboard"), flush_secs=30)   # near-live curves
 
     def write(self, stream: str, step: int, entry: dict, tb_prefix: str = None):
         """Appends `entry` to <stream>.jsonl. Numeric fields also go to TensorBoard: keys already
